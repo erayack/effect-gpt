@@ -14,7 +14,9 @@
   "dependencies": {
     "effect": "^3.16.0",
     "@effect/platform": "^0.87.0",
-    "@effect/platform-bun": "^0.60.22"
+    "@effect/platform-bun": "^0.60.22",
+    "@effect/experimental": "^0.44.21",
+    "@effect/sql": "^0.33.21"
   },
   "devDependencies": {
     "@types/bun": "latest",
