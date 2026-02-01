@@ -16,7 +16,7 @@ export class OutputProjection implements ModelLayer {
   cachedInput: Tensor2D | null = null
   optimizerWOut: Adam
 
-  constructor(embeddingDim: number = EMBEDDING_DIM, vocabSize: number, rng?: Rng) {
+  constructor(embeddingDim: number = EMBEDDING_DIM, vocabSize: number, rng: Rng) {
     const std = Math.sqrt(2.0 / embeddingDim)
     this.wOut = Ops.initNormal(embeddingDim, vocabSize, 0, std, rng)
     this.bOut = T.zeros(1, vocabSize)

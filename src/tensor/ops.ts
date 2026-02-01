@@ -340,8 +340,8 @@ export const broadcastAddRow = (t: Tensor2D, row: Tensor2D): Effect.Effect<Tenso
     return T.make(t.rows, t.cols, data)
   }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
 
-export const initNormal = (rows: number, cols: number, mean: number, std: number, rng?: Rng): Tensor2D => {
-  const rand = rng ? () => rng.next() : Math.random
+export const initNormal = (rows: number, cols: number, mean: number, std: number, rng: Rng): Tensor2D => {
+  const rand = () => rng.next()
   const data = new Float32Array(rows * cols)
   for (let i = 0; i < data.length; i++) {
     let u1 = rand()

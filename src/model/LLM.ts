@@ -11,6 +11,7 @@ import { OutputProjection } from "./OutputProjection"
 import { Vocab } from "../vocab/Vocab"
 import { tokenize } from "../tokenize/tokenize"
 import { MAX_SEQ_LEN, EMBEDDING_DIM, HIDDEN_DIM } from "../config"
+import type { Rng } from "../tensor/random"
 
 export class LLM {
   readonly vocab: Vocab
@@ -21,25 +22,17 @@ export class LLM {
     this.network = network
   }
 
-  static default(): LLM {
+  static default(rng: Rng, numTransformerBlocks = 1): LLM {
     const vocab = Vocab.make(Vocab.defaultWords())
-    const vocabSize = vocab.words.length
-    const network: Array<ModelLayer> = [
-      new Embeddings(vocabSize, EMBEDDING_DIM, MAX_SEQ_LEN),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM),
-      new OutputProjection(EMBEDDING_DIM, vocabSize)
-    ]
-    return new LLM(vocab, network)
+    return LLM.make(vocab, rng, numTransformerBlocks)
   }
 
-  static make(vocab: Vocab): LLM {
+  static make(vocab: Vocab, rng: Rng, numTransformerBlocks = 3): LLM {
     const vocabSize = vocab.words.length
     const network: Array<ModelLayer> = [
-      new Embeddings(vocabSize, EMBEDDING_DIM, MAX_SEQ_LEN),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM),
-      new OutputProjection(EMBEDDING_DIM, vocabSize)
+      new Embeddings(vocabSize, EMBEDDING_DIM, MAX_SEQ_LEN, rng),
+      ...Array.from({ length: numTransformerBlocks }, () => new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM, rng)),
+      new OutputProjection(EMBEDDING_DIM, vocabSize, rng)
     ]
     return new LLM(vocab, network)
   }

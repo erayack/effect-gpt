@@ -20,7 +20,7 @@ export class SelfAttention implements ModelLayer {
   optimizerWK: Adam
   optimizerWV: Adam
 
-  constructor(embeddingDim: number = EMBEDDING_DIM, rng?: Rng) {
+  constructor(embeddingDim: number = EMBEDDING_DIM, rng: Rng) {
     this.embeddingDim = embeddingDim
     const std = Math.sqrt(2.0 / embeddingDim)
     this.wQ = Ops.initNormal(embeddingDim, embeddingDim, 0, std, rng)

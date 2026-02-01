@@ -18,6 +18,8 @@ import {
 import { MAX_SEQ_LEN, EMBEDDING_DIM, HIDDEN_DIM } from "../config"
 import { TerminalLoggerLive, info, error as logError } from "../services/Logger"
 import { InMemoryMetricsLive, snapshot } from "../services/Metrics"
+import { SeedLayer, useSeedRng } from "../services/SeedLayer"
+import type { Rng } from "../tensor/random"
 
 const PRETRAIN_EPOCHS = 100
 const PRETRAIN_LR = 0.0005
@@ -55,9 +57,19 @@ const repl = (llm: LLM) =>
     })
   )
 
+const parseSeedArg = (argv: string[]): number | undefined => {
+  const seedIndex = argv.findIndex((arg) => arg === "--seed")
+  if (seedIndex >= 0 && seedIndex < argv.length - 1) {
+    const asNum = Number(argv[seedIndex + 1])
+    return Number.isFinite(asNum) ? asNum : undefined
+  }
+  return undefined
+}
+
 const main = Effect.scoped(
   Effect.gen(function* () {
     const terminal = yield* Terminal.Terminal
+    const rng: Rng = yield* useSeedRng()
 
     const dataset = Dataset.load({
       pretrainingPath: "data/pretraining_data.json",
@@ -74,11 +86,11 @@ const main = Effect.scoped(
 
     const vocabSize = vocab.words.length
     const network = [
-      new Embeddings(vocabSize, EMBEDDING_DIM, MAX_SEQ_LEN),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM),
-      new OutputProjection(EMBEDDING_DIM, vocabSize)
+      new Embeddings(vocabSize, EMBEDDING_DIM, MAX_SEQ_LEN, rng),
+      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM, rng),
+      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM, rng),
+      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM, rng),
+      new OutputProjection(EMBEDDING_DIM, vocabSize, rng)
     ]
     const llm = new LLM(vocab, network)
 
@@ -134,7 +146,10 @@ const main = Effect.scoped(
 
 const LoggerLayer = TerminalLoggerLive("info").pipe(Layer.provide(BunTerminal.layer))
 
-const AppLayer = Layer.mergeAll(BunFileSystem.layer, BunTerminal.layer, LoggerLayer, InMemoryMetricsLive)
+const seedValue = parseSeedArg(process.argv)
+const SeedLayerLive = SeedLayer(seedValue)
+
+const AppLayer = Layer.mergeAll(BunFileSystem.layer, BunTerminal.layer, LoggerLayer, InMemoryMetricsLive, SeedLayerLive)
 
 const program = Effect.scoped(
   main.pipe(

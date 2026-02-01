@@ -9,6 +9,7 @@ export * as TensorOps from "./tensor/ops"
 export { ShapeError } from "./tensor/ops"
 export type { Rng } from "./tensor/random"
 export { seeded } from "./tensor/random"
+export { systemRng } from "./tensor/random"
 
 export type { ModelLayer } from "./model/ModelLayer"
 export { Embeddings } from "./model/Embeddings"
@@ -37,6 +38,8 @@ export type {
   LoggerServiceId,
   RandomService,
   RandomServiceId,
+  SeedService,
+  SeedServiceId,
   MetricsService,
   MetricsServiceId,
   MetricsSnapshot,
@@ -62,6 +65,9 @@ export {
   nextGaussian,
   nextInt,
   fork,
+  Seed,
+  SeedLayer,
+  useSeedRng,
   Metrics,
   InMemoryMetricsLive,
   NoOpMetricsLive,

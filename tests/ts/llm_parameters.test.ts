@@ -3,6 +3,7 @@ import { LLM } from "../../src/model/LLM"
 import { Vocab } from "../../src/vocab/Vocab"
 import { EMBEDDING_DIM, HIDDEN_DIM, MAX_SEQ_LEN } from "../../src/config"
 import { makeLLM } from "./support/factories"
+import { seeded } from "../../src/tensor/random"
 
 describe("LLM Parameters", () => {
   const computeExpectedParams = (vocabSize: number, numTransformerBlocks: number): number => {
@@ -20,7 +21,7 @@ describe("LLM Parameters", () => {
   }
 
   test("default LLM parameter count matches formula", () => {
-    const llm = LLM.default()
+    const llm = LLM.default(seeded(1))
     const vocabSize = llm.vocab.words.length
     const expected = computeExpectedParams(vocabSize, 1)
     expect(llm.totalParameters()).toBe(expected)
@@ -28,7 +29,7 @@ describe("LLM Parameters", () => {
 
   test("make LLM parameter count matches formula (3 transformer blocks)", () => {
     const vocab = Vocab.make(Vocab.defaultWords())
-    const llm = LLM.make(vocab)
+    const llm = LLM.make(vocab, seeded(2))
     const vocabSize = vocab.words.length
     const expected = computeExpectedParams(vocabSize, 3)
     expect(llm.totalParameters()).toBe(expected)
@@ -49,7 +50,7 @@ describe("LLM Parameters", () => {
   })
 
   test("individual layer params sum to total", () => {
-    const llm = LLM.default()
+    const llm = LLM.default(seeded(3))
     const sumOfLayers = llm.network.reduce((sum, layer) => sum + layer.parametersCount, 0)
     expect(llm.totalParameters()).toBe(sumOfLayers)
   })

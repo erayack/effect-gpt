@@ -25,3 +25,8 @@ export const seeded = (seed: number): Rng => {
     }
   }
 }
+
+/** Non-deterministic RNG wrapper around Math.random for convenience. */
+export const systemRng = (): Rng => ({
+  next: () => Math.random()
+})

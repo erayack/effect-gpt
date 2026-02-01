@@ -17,7 +17,7 @@ export class Embeddings implements ModelLayer {
   tokenOptimizer: Adam
   positionalOptimizer: Adam
 
-  constructor(vocabSize: number, embeddingDim: number = EMBEDDING_DIM, maxSeqLen: number = MAX_SEQ_LEN, rng?: Rng) {
+  constructor(vocabSize: number, embeddingDim: number = EMBEDDING_DIM, maxSeqLen: number = MAX_SEQ_LEN, rng: Rng) {
     this.tokenEmbeddings = Ops.initNormal(vocabSize, embeddingDim, 0, 0.02, rng)
     this.positionalEmbeddings = Ops.initNormal(maxSeqLen, embeddingDim, 0, 0.02, rng)
     this.tokenOptimizer = Adam.make(vocabSize, embeddingDim)

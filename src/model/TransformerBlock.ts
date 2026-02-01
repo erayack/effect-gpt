@@ -15,7 +15,7 @@ export class TransformerBlock implements ModelLayer {
   norm1: LayerNorm
   norm2: LayerNorm
 
-  constructor(embeddingDim: number = EMBEDDING_DIM, hiddenDim: number = HIDDEN_DIM, rng?: Rng) {
+  constructor(embeddingDim: number = EMBEDDING_DIM, hiddenDim: number = HIDDEN_DIM, rng: Rng) {
     this.attention = new SelfAttention(embeddingDim, rng)
     this.feedForward = new FeedForward(embeddingDim, hiddenDim, rng)
     this.norm1 = new LayerNorm(embeddingDim)

@@ -23,7 +23,7 @@ export class FeedForward implements ModelLayer {
   optimizerW2: Adam
   optimizerB2: Adam
 
-  constructor(embeddingDim: number = EMBEDDING_DIM, hiddenDim: number = HIDDEN_DIM, rng?: Rng) {
+  constructor(embeddingDim: number = EMBEDDING_DIM, hiddenDim: number = HIDDEN_DIM, rng: Rng) {
     const stdW1 = Math.sqrt(2.0 / embeddingDim)
     const stdW2 = Math.sqrt(2.0 / hiddenDim)
 
