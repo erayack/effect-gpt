@@ -1,6 +1,6 @@
 const ASCII_PUNCTUATION = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/
 
-export const isAsciiPunctuation = (ch: string): boolean =>
+const isAsciiPunctuation = (ch: string): boolean =>
   ch.length === 1 && ASCII_PUNCTUATION.test(ch)
 
 export const splitWordToTokens = (word: string): ReadonlyArray<string> => {

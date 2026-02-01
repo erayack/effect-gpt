@@ -10,12 +10,7 @@ import * as Effect from "effect/Effect"
  */
 export const runEffect = <A, E>(effect: Effect.Effect<A, E>): A => Effect.runSync(effect)
 
-/**
- * Runs an Effect asynchronously and returns a Promise.
- * Use when the effect may perform async operations.
- */
-export const runEffectAsync = <A, E>(effect: Effect.Effect<A, E>): Promise<A> =>
-  Effect.runPromise(effect)
+
 
 /**
  * Runs an Effect and expects it to fail with a specific error type.

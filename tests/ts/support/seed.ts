@@ -9,5 +9,4 @@ export const CANONICAL_SEED = 1337
 /** Creates a seeded RNG with the canonical test seed. */
 export const testRng = (): Rng => seeded(CANONICAL_SEED)
 
-/** Creates a seeded RNG with a custom seed. */
-export const testRngWithSeed = (seed: number): Rng => seeded(seed)
+

@@ -15,7 +15,7 @@ import { LLM } from "../../../src/model/LLM"
 import { Vocab } from "../../../src/vocab/Vocab"
 import type { ModelLayer } from "../../../src/model/ModelLayer"
 
-export interface EmbeddingsOptions {
+interface EmbeddingsOptions {
   seed?: number
   embeddingDim?: number
   maxSeqLen?: number
@@ -27,7 +27,7 @@ export const makeEmbeddings = (vocabSize: number, options: EmbeddingsOptions = {
   return new Embeddings(vocabSize, embeddingDim, maxSeqLen, rng)
 }
 
-export interface SelfAttentionOptions {
+interface SelfAttentionOptions {
   seed?: number
   embeddingDim?: number
 }
@@ -38,7 +38,7 @@ export const makeSelfAttention = (options: SelfAttentionOptions = {}): SelfAtten
   return new SelfAttention(embeddingDim, rng)
 }
 
-export interface FeedForwardOptions {
+interface FeedForwardOptions {
   seed?: number
   embeddingDim?: number
   hiddenDim?: number
@@ -50,7 +50,7 @@ export const makeFeedForward = (options: FeedForwardOptions = {}): FeedForward =
   return new FeedForward(embeddingDim, hiddenDim, rng)
 }
 
-export interface LayerNormOptions {
+interface LayerNormOptions {
   embeddingDim?: number
 }
 
@@ -59,7 +59,7 @@ export const makeLayerNorm = (options: LayerNormOptions = {}): LayerNorm => {
   return new LayerNorm(embeddingDim)
 }
 
-export interface TransformerBlockOptions {
+interface TransformerBlockOptions {
   seed?: number
   embeddingDim?: number
   hiddenDim?: number
@@ -71,7 +71,7 @@ export const makeTransformerBlock = (options: TransformerBlockOptions = {}): Tra
   return new TransformerBlock(embeddingDim, hiddenDim, rng)
 }
 
-export interface OutputProjectionOptions {
+interface OutputProjectionOptions {
   seed?: number
   embeddingDim?: number
 }
@@ -90,7 +90,7 @@ export const makeOutputProjection = (
  */
 export const makeRng = (seed: number = CANONICAL_SEED): Rng => seeded(seed)
 
-export interface LLMOptions {
+interface LLMOptions {
   seed?: number
   vocabWords?: ReadonlyArray<string>
   numTransformerBlocks?: number
@@ -114,7 +114,7 @@ export const makeLLM = (options: LLMOptions = {}): LLM => {
   return new LLM(vocab, network)
 }
 
-export interface LLMWithCustomNetworkOptions {
+interface LLMWithCustomNetworkOptions {
   vocabWords?: ReadonlyArray<string>
   network: ReadonlyArray<ModelLayer>
 }

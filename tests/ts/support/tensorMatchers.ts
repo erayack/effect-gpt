@@ -4,8 +4,7 @@
 import { expect } from "bun:test"
 import type { Tensor2D } from "../../../src/tensor/Tensor2D"
 
-/** Default epsilon for floating-point comparisons. */
-export const DEFAULT_EPSILON = 1e-5
+const DEFAULT_EPSILON = 1e-5
 
 /**
  * Asserts that a tensor has the expected shape.
