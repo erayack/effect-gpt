@@ -15,6 +15,8 @@ import type { LoggerServiceId } from "../services/Logger"
 import { info } from "../services/Logger"
 import type { MetricsServiceId } from "../services/Metrics"
 import { counter, gauge, timed } from "../services/Metrics"
+import { TrainingError } from "../errors"
+import type { TrainingError as TrainingErrorType } from "../errors"
 
 export interface TrainingConfig {
   readonly epochs: number
@@ -59,9 +61,24 @@ type TrainEnv =
   | MetricsServiceId
   | PreprocessSettingsId
 
+const mapShapeError = <A, R>(effect: Effect.Effect<A, ShapeError, R>) =>
+  effect.pipe(Effect.mapError(TrainingError.shape))
+
+const mapShapeUnknown = (error: unknown): TrainingErrorType =>
+  error instanceof Ops.ShapeError ? TrainingError.shape(error) : TrainingError.fromUnknown(error)
+
+const wrapThrowing = <A>(
+  thunk: () => A,
+  mapError: (error: unknown) => TrainingErrorType = TrainingError.fromUnknown
+) =>
+  Effect.try({
+    try: thunk,
+    catch: (error) => mapError(error)
+  })
+
 const trainWithStreamFactory = <E, R>(
   makeStream: () => Stream.Stream<string, E, R>
-): Effect.Effect<void, ShapeError | E, R | TrainEnv> =>
+): Effect.Effect<void, TrainingErrorType, R | TrainEnv> =>
   Effect.gen(function* () {
     const llm = yield* LLMService
     const config = yield* TrainingConfig
@@ -79,7 +96,7 @@ const trainWithStreamFactory = <E, R>(
 
     const endTokenId = llm.vocab.encode("</s>")
     if (endTokenId._tag === "None") {
-      return yield* Effect.fail(new Ops.ShapeError("End token </s> not found in vocabulary"))
+      return yield* Effect.fail(TrainingError.config("End token </s> not found in vocabulary"))
     }
 
     const clipNorm = config.clipNorm ?? 5.0
@@ -109,31 +126,33 @@ const trainWithStreamFactory = <E, R>(
             })
         })
 
-        const preprocessed = makeStream().pipe(
-          Stream.mapChunks(Chunk.chunksOf(batchSize)),
-          Stream.flattenChunks,
-          Stream.mapEffect(preprocess, { concurrency }),
-          Stream.filterMap((value) => value)
-        )
+        const preprocessed = makeStream()
+          .pipe(
+            Stream.mapError(TrainingError.fromUnknown),
+            Stream.mapChunks(Chunk.chunksOf(batchSize)),
+            Stream.flattenChunks,
+            Stream.mapEffect(preprocess, { concurrency }),
+            Stream.filterMap((value) => value)
+          )
 
         yield* Effect.scoped(
           Stream.runForEachScoped(preprocessed, ({ inputIds, targetIds }) =>
             Effect.gen(function* () {
               let input = T.fromArray(1, inputIds.length, inputIds)
               for (const layer of llm.network) {
-                input = yield* layer.forward(input)
+                input = yield* mapShapeError(layer.forward(input))
               }
 
               const logits = input
-              const probs = softmaxRows(logits)
+              const probs = yield* wrapThrowing(() => softmaxRows(logits), mapShapeUnknown)
 
-              totalLoss += crossEntropyLoss(probs, targetIds)
-
-              let grads = dLogits(probs, targetIds)
+              const loss = yield* wrapThrowing(() => crossEntropyLoss(probs, targetIds), mapShapeUnknown)
+              totalLoss += loss
+              let grads = yield* wrapThrowing(() => dLogits(probs, targetIds), mapShapeUnknown)
               clipGlobalL2(grads, clipNorm)
 
               for (let i = llm.network.length - 1; i >= 0; i--) {
-                grads = yield* llm.network[i]!.backward(grads, config.learningRate)
+                grads = yield* mapShapeError(llm.network[i]!.backward(grads, config.learningRate))
               }
 
               const tokens = Ops.argmaxRows(probs)
@@ -165,9 +184,9 @@ const trainWithStreamFactory = <E, R>(
 
 export const train = (
   examples: ReadonlyArray<string>
-): Effect.Effect<void, ShapeError, TrainEnv> =>
+): Effect.Effect<void, TrainingErrorType, TrainEnv> =>
   trainWithStreamFactory(() => Stream.fromIterable(examples))
 
 export const trainStream = <E, R>(
   makeStream: () => Stream.Stream<string, E, R>
-): Effect.Effect<void, ShapeError | E, R | TrainEnv> => trainWithStreamFactory(makeStream)
+): Effect.Effect<void, TrainingErrorType, R | TrainEnv> => trainWithStreamFactory(makeStream)

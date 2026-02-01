@@ -1,6 +1,15 @@
 export { Vocab } from "./vocab/Vocab"
 export { tokenize } from "./tokenize/tokenize"
 export { Dataset, DatasetLoadError, DatasetParseError } from "./data/Dataset"
+export {
+  TrainingError,
+  TrainingDatasetError,
+  TrainingShapeError,
+  TrainingTokenizerError,
+  TrainingOptimizerError,
+  TrainingConfigError,
+  TrainingUnknownError
+} from "./errors"
 export * from "./config"
 
 export type { Tensor2D } from "./tensor/Tensor2D"

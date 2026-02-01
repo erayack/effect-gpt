@@ -20,6 +20,8 @@ import { TerminalLoggerLive, info, error as logError } from "../services/Logger"
 import { InMemoryMetricsLive, snapshot } from "../services/Metrics"
 import { SeedLayer, useSeedRng } from "../services/SeedLayer"
 import type { Rng } from "../tensor/random"
+import type { TrainingError } from "../errors"
+import { formatTrainingError } from "./errors"
 
 const PRETRAIN_EPOCHS = 100
 const PRETRAIN_LR = 0.0005
@@ -154,7 +156,7 @@ const AppLayer = Layer.mergeAll(BunFileSystem.layer, BunTerminal.layer, LoggerLa
 const program = Effect.scoped(
   main.pipe(
     Effect.provide(AppLayer),
-    Effect.catchAll((err) => logError(`Fatal: ${String(err)}`).pipe(Effect.provide(AppLayer)))
+    Effect.catchAll((err) => logError(formatTrainingError(err as TrainingError)).pipe(Effect.provide(AppLayer)))
   )
 )
 
