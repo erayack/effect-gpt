@@ -3,6 +3,7 @@ import * as Stream from "effect/Stream"
 import * as Chunk from "effect/Chunk"
 import * as Context from "effect/Context"
 import * as Layer from "effect/Layer"
+import * as Ref from "effect/Ref"
 import * as Option from "effect/Option"
 import type { ShapeError } from "../tensor/ops"
 import * as Ops from "../tensor/ops"
@@ -24,6 +25,7 @@ export interface TrainingConfig {
   readonly clipNorm?: number
   readonly preprocessConcurrency?: number | "unbounded"
   readonly preprocessBatchSize?: number
+  readonly trainConcurrency?: number
 }
 
 interface TrainingConfigId {
@@ -76,6 +78,9 @@ const wrapThrowing = <A>(
     catch: (error) => mapError(error)
   })
 
+const clampConcurrency = (value: number | undefined, fallback: number): number =>
+  value === undefined ? fallback : Math.max(1, value)
+
 const trainWithStreamFactory = <E, R>(
   makeStream: () => Stream.Stream<string, E, R>
 ): Effect.Effect<void, TrainingErrorType, R | TrainEnv> =>
@@ -102,6 +107,7 @@ const trainWithStreamFactory = <E, R>(
     const clipNorm = config.clipNorm ?? 5.0
     const concurrency = preprocessSettings.concurrency
     const batchSize = Math.max(1, preprocessSettings.batchSize)
+    const trainConcurrency = clampConcurrency(config.trainConcurrency, 4)
 
     const epochCounter = yield* counter("epochs_completed")
     const lossGauge = yield* gauge("epoch_loss")
@@ -109,12 +115,11 @@ const trainWithStreamFactory = <E, R>(
 
     for (let epoch = 0; epoch < config.epochs; epoch++) {
       const epochResult = yield* timed(`epoch_${epoch}`, Effect.gen(function* () {
-        let totalLoss = 0
-        let totalExamples = 0
+        const totalLossRef = yield* Ref.make(0)
+        const totalExamplesRef = yield* Ref.make(0)
 
         const preprocess = (text: string) =>
           Effect.sync(() => {
-            totalExamples++
             const tokens = [...tokenize(text, llm.vocab)]
             if (tokens.length < 2) {
               return Option.none<{ inputIds: number[]; targetIds: number[] }>()
@@ -135,35 +140,41 @@ const trainWithStreamFactory = <E, R>(
             Stream.filterMap((value) => value)
           )
 
+        const trainExample = ({ inputIds, targetIds }: { inputIds: number[]; targetIds: number[] }) =>
+          Effect.gen(function* () {
+            let input = T.fromArray(1, inputIds.length, inputIds)
+            for (const layer of llm.network) {
+              input = yield* mapShapeError(layer.forward(input))
+            }
+
+            const logits = input
+            const probs = yield* wrapThrowing(() => softmaxRows(logits), mapShapeUnknown)
+            const loss = yield* wrapThrowing(() => crossEntropyLoss(probs, targetIds), mapShapeUnknown)
+            yield* Ref.update(totalLossRef, (current) => current + loss)
+            yield* Ref.update(totalExamplesRef, (current) => current + 1)
+
+            let grads = yield* wrapThrowing(() => dLogits(probs, targetIds), mapShapeUnknown)
+            clipGlobalL2(grads, clipNorm)
+
+            for (let i = llm.network.length - 1; i >= 0; i--) {
+              grads = yield* mapShapeError(llm.network[i]!.backward(grads, config.learningRate))
+            }
+
+            const tokens = Ops.argmaxRows(probs)
+            const nextToken = tokens[tokens.length - 1]
+            if (nextToken === endTokenId.value) {
+              return
+            }
+          })
+
         yield* Effect.scoped(
-          Stream.runForEachScoped(preprocessed, ({ inputIds, targetIds }) =>
-            Effect.gen(function* () {
-              let input = T.fromArray(1, inputIds.length, inputIds)
-              for (const layer of llm.network) {
-                input = yield* mapShapeError(layer.forward(input))
-              }
-
-              const logits = input
-              const probs = yield* wrapThrowing(() => softmaxRows(logits), mapShapeUnknown)
-
-              const loss = yield* wrapThrowing(() => crossEntropyLoss(probs, targetIds), mapShapeUnknown)
-              totalLoss += loss
-              let grads = yield* wrapThrowing(() => dLogits(probs, targetIds), mapShapeUnknown)
-              clipGlobalL2(grads, clipNorm)
-
-              for (let i = llm.network.length - 1; i >= 0; i--) {
-                grads = yield* mapShapeError(llm.network[i]!.backward(grads, config.learningRate))
-              }
-
-              const tokens = Ops.argmaxRows(probs)
-              const nextToken = tokens[tokens.length - 1]
-              if (nextToken === endTokenId.value) {
-                return
-              }
-            })
+          Stream.runDrain(
+            Stream.mapEffect(preprocessed, trainExample, { concurrency: trainConcurrency })
           )
         )
 
+        const totalLoss = yield* Ref.get(totalLossRef)
+        const totalExamples = yield* Ref.get(totalExamplesRef)
         yield* examplesCounter.inc(totalExamples)
         return { totalLoss, totalExamples }
       }))

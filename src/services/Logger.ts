@@ -26,35 +26,44 @@ export interface LoggerServiceId {
 
 export const Logger = Context.GenericTag<LoggerServiceId, LoggerService>("LoggerService")
 
-const formatMessage = (level: LogLevel, message: string, data?: Record<string, unknown>): string => {
+type Formatter = (level: LogLevel, message: string, data?: Record<string, unknown>) => string
+
+const formatStructured: Formatter = (level, message, data) => {
   const timestamp = new Date().toISOString()
   const dataStr = data ? ` ${JSON.stringify(data)}` : ""
   return `[${timestamp}] [${level.toUpperCase()}] ${message}${dataStr}\n`
 }
 
+const formatPretty: Formatter = (level, message, data) => {
+  const prefix: Record<LogLevel, string> = { debug: "🔍", info: "ℹ️ ", warn: "⚠️ ", error: "❌" }
+  const dataStr = data ? ` ${JSON.stringify(data)}` : ""
+  return `${prefix[level]} ${message}${dataStr}\n`
+}
+
 const makeLogger = (
   minLevel: LogLevel,
-  write: (msg: string) => Effect.Effect<void>
+  write: (msg: string) => Effect.Effect<void>,
+  format: Formatter = formatStructured
 ): LoggerService => ({
   log: (level, message, data) =>
     LOG_LEVEL_PRIORITY[level] >= LOG_LEVEL_PRIORITY[minLevel]
-      ? write(formatMessage(level, message, data))
+      ? write(format(level, message, data))
       : Effect.void,
   debug: (message, data) =>
     LOG_LEVEL_PRIORITY.debug >= LOG_LEVEL_PRIORITY[minLevel]
-      ? write(formatMessage("debug", message, data))
+      ? write(format("debug", message, data))
       : Effect.void,
   info: (message, data) =>
     LOG_LEVEL_PRIORITY.info >= LOG_LEVEL_PRIORITY[minLevel]
-      ? write(formatMessage("info", message, data))
+      ? write(format("info", message, data))
       : Effect.void,
   warn: (message, data) =>
     LOG_LEVEL_PRIORITY.warn >= LOG_LEVEL_PRIORITY[minLevel]
-      ? write(formatMessage("warn", message, data))
+      ? write(format("warn", message, data))
       : Effect.void,
   error: (message, data) =>
     LOG_LEVEL_PRIORITY.error >= LOG_LEVEL_PRIORITY[minLevel]
-      ? write(formatMessage("error", message, data))
+      ? write(format("error", message, data))
       : Effect.void
 })
 
@@ -84,6 +93,20 @@ export const NullLoggerLive: Layer.Layer<LoggerServiceId> = Layer.succeed(
   Logger,
   makeLogger("error", () => Effect.void)
 )
+
+export const SilentLoggerLive: Layer.Layer<LoggerServiceId> = Layer.succeed(Logger, {
+  log: () => Effect.void,
+  debug: () => Effect.void,
+  info: () => Effect.void,
+  warn: () => Effect.void,
+  error: () => Effect.void
+})
+
+export const PrettyLoggerLive = (minLevel: LogLevel = "info"): Layer.Layer<LoggerServiceId> =>
+  Layer.succeed(
+    Logger,
+    makeLogger(minLevel, (msg) => Effect.sync(() => process.stdout.write(msg)), formatPretty)
+  )
 
 export const log = (level: LogLevel, message: string, data?: Record<string, unknown>) =>
   Effect.flatMap(Logger, (logger) => logger.log(level, message, data))

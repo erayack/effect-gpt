@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect"
+import * as FiberId from "effect/FiberId"
 import type { Tensor2D } from "../tensor/Tensor2D"
 import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
@@ -15,9 +16,13 @@ export class FeedForward implements ModelLayer {
   w2: Tensor2D
   b2: Tensor2D
 
-  cachedInput: Tensor2D | null = null
-  cachedHiddenPreActivation: Tensor2D | null = null
-  cachedHiddenPostActivation: Tensor2D | null = null
+  private cache = new Map<
+    number | string,
+    { input: Tensor2D; hiddenPreActivation: Tensor2D; hiddenPostActivation: Tensor2D }
+  >()
+  private lastCache:
+    | { input: Tensor2D; hiddenPreActivation: Tensor2D; hiddenPostActivation: Tensor2D }
+    | null = null
   optimizerW1: Adam
   optimizerB1: Adam
   optimizerW2: Adam
@@ -37,20 +42,32 @@ export class FeedForward implements ModelLayer {
     this.optimizerB2 = Adam.make(1, embeddingDim)
   }
 
+  private fiberKey(fiberId: FiberId.FiberId): number | string {
+    return FiberId.isRuntime(fiberId) ? fiberId.id : JSON.stringify(fiberId)
+  }
+
   get parametersCount(): number {
     return this.w1.data.length + this.b1.data.length + this.w2.data.length + this.b2.data.length
   }
 
   forward(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      this.cachedInput = T.clone(input)
+      const fiberId = yield* Effect.fiberId
+      const key = this.fiberKey(fiberId)
 
       const h1 = yield* Ops.matMul(input, this.w1)
       const h1Bias = yield* Ops.addRowBias(h1, this.b1)
-      this.cachedHiddenPreActivation = T.clone(h1Bias)
+      const h1BiasClone = T.clone(h1Bias)
 
       const h1Relu = Ops.relu(h1Bias)
-      this.cachedHiddenPostActivation = T.clone(h1Relu)
+      const h1ReluClone = T.clone(h1Relu)
+      const cached = {
+        input: T.clone(input),
+        hiddenPreActivation: h1BiasClone,
+        hiddenPostActivation: h1ReluClone
+      }
+      this.cache.set(key, cached)
+      this.lastCache = cached
 
       const h2 = yield* Ops.matMul(h1Relu, this.w2)
       const h2Bias = yield* Ops.addRowBias(h2, this.b2)
@@ -61,24 +78,27 @@ export class FeedForward implements ModelLayer {
 
   backward(dOut: Tensor2D, lr: number): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      if (!this.cachedInput || !this.cachedHiddenPreActivation || !this.cachedHiddenPostActivation) {
+      const fiberId = yield* Effect.fiberId
+      const key = this.fiberKey(fiberId)
+      const cached = this.cache.get(key) ?? this.lastCache
+      if (!cached) {
         return yield* Effect.fail(new Ops.ShapeError("FeedForward.backward called before forward"))
       }
+      this.cache.delete(key)
+      this.lastCache = null
 
-      const input = this.cachedInput
-      const hiddenPre = this.cachedHiddenPreActivation
-      const hiddenPost = this.cachedHiddenPostActivation
+      const { input, hiddenPreActivation, hiddenPostActivation } = cached
 
-      const hiddenPostT = Ops.transpose(hiddenPost)
+      const hiddenPostT = Ops.transpose(hiddenPostActivation)
       const gradW2 = yield* Ops.matMul(hiddenPostT, dOut)
       const gradB2 = Ops.sumCols(dOut)
 
       const w2T = Ops.transpose(this.w2)
       const gradHiddenPost = yield* Ops.matMul(dOut, w2T)
 
-      const reluGrad = T.zeros(hiddenPre.rows, hiddenPre.cols)
-      for (let i = 0; i < hiddenPre.data.length; i++) {
-        reluGrad.data[i] = hiddenPre.data[i] > 0 ? 1 : 0
+      const reluGrad = T.zeros(hiddenPreActivation.rows, hiddenPreActivation.cols)
+      for (let i = 0; i < hiddenPreActivation.data.length; i++) {
+        reluGrad.data[i] = hiddenPreActivation.data[i] > 0 ? 1 : 0
       }
       const gradHiddenPre = yield* Ops.mul(gradHiddenPost, reluGrad)
 

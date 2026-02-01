@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect"
+import * as FiberId from "effect/FiberId"
 import type { Tensor2D } from "../tensor/Tensor2D"
 import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
@@ -15,7 +16,8 @@ export class SelfAttention implements ModelLayer {
   wK: Tensor2D
   wV: Tensor2D
 
-  cachedInput: Tensor2D | null = null
+  private cache = new Map<number | string, Tensor2D>()
+  private lastCache: Tensor2D | null = null
   optimizerWQ: Adam
   optimizerWK: Adam
   optimizerWV: Adam
@@ -29,6 +31,10 @@ export class SelfAttention implements ModelLayer {
     this.optimizerWQ = Adam.make(embeddingDim, embeddingDim)
     this.optimizerWK = Adam.make(embeddingDim, embeddingDim)
     this.optimizerWV = Adam.make(embeddingDim, embeddingDim)
+  }
+
+  private fiberKey(fiberId: FiberId.FiberId): number | string {
+    return FiberId.isRuntime(fiberId) ? fiberId.id : JSON.stringify(fiberId)
   }
 
   get parametersCount(): number {
@@ -66,7 +72,11 @@ export class SelfAttention implements ModelLayer {
 
   forward(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      this.cachedInput = T.clone(input)
+      const fiberId = yield* Effect.fiberId
+      const key = this.fiberKey(fiberId)
+      const cloned = T.clone(input)
+      this.cache.set(key, cloned)
+      this.lastCache = cloned
       const { q, k, v } = yield* this.computeQKV(input)
       const attended = yield* this.attention(q, k, v)
       const output = yield* Ops.add(attended, input)
@@ -93,11 +103,16 @@ export class SelfAttention implements ModelLayer {
 
   backward(dOut: Tensor2D, lr: number): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      if (!this.cachedInput) {
+      const fiberId = yield* Effect.fiberId
+      const key = this.fiberKey(fiberId)
+      const cachedInput = this.cache.get(key) ?? this.lastCache
+      if (!cachedInput) {
         return yield* Effect.fail(new Ops.ShapeError("SelfAttention.backward called before forward"))
       }
+      this.cache.delete(key)
+      this.lastCache = null
 
-      const input = this.cachedInput
+      const input = cachedInput
       const q = yield* Ops.matMul(input, this.wQ)
       const k = yield* Ops.matMul(input, this.wK)
       const v = yield* Ops.matMul(input, this.wV)

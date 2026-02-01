@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect"
+import * as FiberId from "effect/FiberId"
 import type { Tensor2D } from "../tensor/Tensor2D"
 import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
@@ -13,7 +14,8 @@ export class Embeddings implements ModelLayer {
   tokenEmbeddings: Tensor2D
   positionalEmbeddings: Tensor2D
 
-  cachedInput: Tensor2D | null = null
+  private cache = new Map<number | string, Tensor2D>()
+  private lastCache: Tensor2D | null = null
   tokenOptimizer: Adam
   positionalOptimizer: Adam
 
@@ -24,13 +26,21 @@ export class Embeddings implements ModelLayer {
     this.positionalOptimizer = Adam.make(maxSeqLen, embeddingDim)
   }
 
+  private fiberKey(fiberId: FiberId.FiberId): number | string {
+    return FiberId.isRuntime(fiberId) ? fiberId.id : JSON.stringify(fiberId)
+  }
+
   get parametersCount(): number {
     return this.tokenEmbeddings.data.length + this.positionalEmbeddings.data.length
   }
 
   forward(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      this.cachedInput = T.clone(input)
+      const fiberId = yield* Effect.fiberId
+      const key = this.fiberKey(fiberId)
+      const cloned = T.clone(input)
+      this.cache.set(key, cloned)
+      this.lastCache = cloned
       const tokenIds: Array<number> = []
       for (let i = 0; i < input.data.length; i++) {
         // Match Rust's float-to-usize truncation behavior.
@@ -53,11 +63,16 @@ export class Embeddings implements ModelLayer {
 
   backward(dOut: Tensor2D, lr: number): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      if (!this.cachedInput) {
+      const fiberId = yield* Effect.fiberId
+      const key = this.fiberKey(fiberId)
+      const cachedInput = this.cache.get(key) ?? this.lastCache
+      if (!cachedInput) {
         return yield* Effect.fail(new Ops.ShapeError("Embeddings.backward called before forward"))
       }
+      this.cache.delete(key)
+      this.lastCache = null
 
-      const input = this.cachedInput
+      const input = cachedInput
       const tokenIds: Array<number> = []
       for (let i = 0; i < input.data.length; i++) {
         tokenIds.push(Math.trunc(input.data[i]))

@@ -4,6 +4,8 @@ export {
   ConsoleLoggerLive,
   TerminalLoggerLive,
   NullLoggerLive,
+  SilentLoggerLive,
+  PrettyLoggerLive,
   log,
   debug,
   info,

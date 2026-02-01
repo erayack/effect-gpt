@@ -14,12 +14,12 @@ import { Embeddings } from "../../src/model/Embeddings"
 import { TransformerBlock } from "../../src/model/TransformerBlock"
 import { OutputProjection } from "../../src/model/OutputProjection"
 import * as T from "../../src/tensor/Tensor2D"
-import { NullLoggerLive, Logger } from "../../src/services/Logger"
+import { SilentLoggerLive, Logger } from "../../src/services/Logger"
 import { NoOpMetricsLive } from "../../src/services/Metrics"
+import { TestServicesLayer as BaseTestServicesLayer } from "./support/stubs"
 
 const TestServicesLayer = Layer.mergeAll(
-  NullLoggerLive,
-  NoOpMetricsLive,
+  BaseTestServicesLayer,
   makePreprocessSettingsLayer({ concurrency: "unbounded", batchSize: 1 })
 )
 

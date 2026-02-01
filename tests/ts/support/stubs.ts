@@ -2,10 +2,13 @@
  * Stub implementations for integration testing.
  */
 import * as Effect from "effect/Effect"
+import * as Layer from "effect/Layer"
 import type { Tensor2D } from "../../../src/tensor/Tensor2D"
 import * as T from "../../../src/tensor/Tensor2D"
 import type { ShapeError } from "../../../src/tensor/ops"
 import type { ModelLayer } from "../../../src/model/ModelLayer"
+import { SilentLoggerLive } from "../../../src/services/Logger"
+import { NoOpMetricsLive } from "../../../src/services/Metrics"
 
 /**
  * Stub OutputProjection that forces EOS token after N forward calls.
@@ -47,3 +50,9 @@ export class StubOutputProjection implements ModelLayer {
     this.callCount = 0
   }
 }
+
+/**
+ * Shared test services layer with silent logging and no-op metrics.
+ * Use this in tests to suppress log output and avoid metrics overhead.
+ */
+export const TestServicesLayer = Layer.mergeAll(SilentLoggerLive, NoOpMetricsLive)

@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect"
+import * as FiberId from "effect/FiberId"
 import type { Tensor2D } from "../tensor/Tensor2D"
 import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
@@ -12,9 +13,8 @@ export class LayerNorm implements ModelLayer {
   gamma: Tensor2D
   beta: Tensor2D
 
-  cachedInput: Tensor2D | null = null
-  cachedMean: Tensor2D | null = null
-  cachedVariance: Tensor2D | null = null
+  private cache = new Map<number | string, { input: Tensor2D; mean: Tensor2D; variance: Tensor2D }>()
+  private lastCache: { input: Tensor2D; mean: Tensor2D; variance: Tensor2D } | null = null
   optimizerGamma: Adam
   optimizerBeta: Adam
 
@@ -23,6 +23,10 @@ export class LayerNorm implements ModelLayer {
     this.beta = T.zeros(1, embeddingDim)
     this.optimizerGamma = Adam.make(1, embeddingDim)
     this.optimizerBeta = Adam.make(1, embeddingDim)
+  }
+
+  private fiberKey(fiberId: FiberId.FiberId): number | string {
+    return FiberId.isRuntime(fiberId) ? fiberId.id : JSON.stringify(fiberId)
   }
 
   get parametersCount(): number {
@@ -34,9 +38,15 @@ export class LayerNorm implements ModelLayer {
       const mean = Ops.meanRows(input)
       const variance = Ops.varRows(input)
 
-      this.cachedInput = T.clone(input)
-      this.cachedMean = T.clone(mean)
-      this.cachedVariance = T.clone(variance)
+      const fiberId = yield* Effect.fiberId
+      const key = this.fiberKey(fiberId)
+      const cached = {
+        input: T.clone(input),
+        mean: T.clone(mean),
+        variance: T.clone(variance)
+      }
+      this.cache.set(key, cached)
+      this.lastCache = cached
 
       // Use sqrt(variance + epsilon) for numerical stability
       const rstd = Ops.mapScalar(variance, (v) => 1.0 / Math.sqrt(v + this.epsilon))
@@ -50,13 +60,16 @@ export class LayerNorm implements ModelLayer {
 
   backward(dOut: Tensor2D, lr: number): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      if (!this.cachedInput || !this.cachedMean || !this.cachedVariance) {
+      const fiberId = yield* Effect.fiberId
+      const key = this.fiberKey(fiberId)
+      const cached = this.cache.get(key) ?? this.lastCache
+      if (!cached) {
         return yield* Effect.fail(new Ops.ShapeError("LayerNorm.backward called before forward"))
       }
+      this.cache.delete(key)
+      this.lastCache = null
 
-      const input = this.cachedInput
-      const mean = this.cachedMean
-      const variance = this.cachedVariance
+      const { input, mean, variance } = cached
       const rows = input.rows
       const cols = input.cols
       const nFeatures = cols

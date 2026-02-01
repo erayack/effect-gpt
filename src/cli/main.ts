@@ -16,7 +16,7 @@ import {
   makePreprocessSettingsLayer
 } from "../training/train"
 import { MAX_SEQ_LEN, EMBEDDING_DIM, HIDDEN_DIM } from "../config"
-import { TerminalLoggerLive, info, error as logError } from "../services/Logger"
+import { PrettyLoggerLive, info, error as logError } from "../services/Logger"
 import { InMemoryMetricsLive, snapshot } from "../services/Metrics"
 import { SeedLayer, useSeedRng } from "../services/SeedLayer"
 import type { Rng } from "../tensor/random"
@@ -146,7 +146,7 @@ const main = Effect.scoped(
   })
 )
 
-const LoggerLayer = TerminalLoggerLive("info").pipe(Layer.provide(BunTerminal.layer))
+const LoggerLayer = PrettyLoggerLive("info")
 
 const seedValue = parseSeedArg(process.argv)
 const SeedLayerLive = SeedLayer(seedValue)
