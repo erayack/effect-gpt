@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/effect-gpt"><img src="https://img.shields.io/npm/v/effect-gpt.svg?style=flat-square" alt="npm version"></a>
   <a href="https://www.npmjs.com/package/effect-gpt"><img src="https://img.shields.io/npm/dm/effect-gpt.svg?style=flat-square" alt="npm downloads"></a>
-  <a href="https://github.com/erayack/RustGPT/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="license"></a>
+  <a href="https://github.com/erayack/effect-gpt/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="license"></a>
 </p>
 
 A transformer-based LLM built from scratch with [Effect](https://effect.website). Inspired by [RustGPT](https://github.com/tekaratzas/RustGPT).
