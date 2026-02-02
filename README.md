@@ -14,6 +14,14 @@ A transformer-based LLM built from scratch with [Effect](https://effect.website)
 npm i effect-gpt
 ```
 
+
+# Commands
+```bash
+bun install
+bun run dev      # train + generate via cli
+bun test         # run test suite
+```
+
 ## What This Is
 
 A complete LLM implementation including:
