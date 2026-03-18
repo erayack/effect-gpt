@@ -10,11 +10,10 @@ export interface SeedService {
   readonly fork: () => SeedService
 }
 
-export interface SeedServiceId {
-  readonly SeedService: unique symbol
-}
+class SeedTag extends Context.Tag("effect-gpt/services/Seed")<SeedTag, SeedService>() {}
 
-export const Seed = Context.GenericTag<SeedServiceId, SeedService>("SeedService")
+export const Seed = SeedTag
+export type SeedServiceId = SeedTag
 
 const makeSeedService = (seed?: number): SeedService => {
   const rng = seed === undefined ? systemRng() : seeded(seed)

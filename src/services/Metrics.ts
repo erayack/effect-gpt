@@ -47,11 +47,10 @@ export interface MetricsSnapshot {
   readonly timings: ReadonlyArray<{ label: string; durationMs: number }>
 }
 
-export interface MetricsServiceId {
-  readonly MetricsService: unique symbol
-}
+class MetricsTag extends Context.Tag("effect-gpt/services/Metrics")<MetricsTag, MetricsService>() {}
 
-export const Metrics = Context.GenericTag<MetricsServiceId, MetricsService>("MetricsService")
+export const Metrics = MetricsTag
+export type MetricsServiceId = MetricsTag
 
 interface InMemoryState {
   counters: HashMap.HashMap<string, Ref.Ref<number>>

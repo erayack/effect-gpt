@@ -9,11 +9,10 @@ export interface RandomService {
   readonly fork: () => Effect.Effect<RandomService>
 }
 
-export interface RandomServiceId {
-  readonly RandomService: unique symbol
-}
+class RandomTag extends Context.Tag("effect-gpt/services/Random")<RandomTag, RandomService>() {}
 
-export const Random = Context.GenericTag<RandomServiceId, RandomService>("RandomService")
+export const Random = RandomTag
+export type RandomServiceId = RandomTag
 
 interface RngState {
   state: number

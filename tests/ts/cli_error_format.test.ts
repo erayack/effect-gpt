@@ -18,9 +18,9 @@ describe("formatTrainingError", () => {
     expect(message).toContain("bad shape")
   })
 
-  test("formats plain Error as unexpected error", () => {
+  test("formats plain Error as unexpected training error", () => {
     const message = formatTrainingError(new Error("boom"))
-    expect(message).toContain("Unexpected error")
+    expect(message).toContain("Unexpected training error")
     expect(message).toContain("boom")
   })
 })

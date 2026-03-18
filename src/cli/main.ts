@@ -1,8 +1,10 @@
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as HashSet from "effect/HashSet"
+import * as Option from "effect/Option"
 import { Terminal } from "@effect/platform"
-import { BunFileSystem, BunRuntime, BunTerminal } from "@effect/platform-bun"
+import { Command, Options } from "@effect/cli"
+import { BunContext, BunRuntime } from "@effect/platform-bun"
 import { Dataset } from "../data/Dataset"
 import { Vocab } from "../vocab/Vocab"
 import { LLM } from "../model/LLM"
@@ -51,15 +53,6 @@ const repl = (llm: LLM) =>
       }
     }).pipe(Effect.withSpan("Cli.repl"))
   )
-
-const parseSeedArg = (argv: string[]): number | undefined => {
-  const seedIndex = argv.findIndex((arg) => arg === "--seed")
-  if (seedIndex >= 0 && seedIndex < argv.length - 1) {
-    const asNum = Number(argv[seedIndex + 1])
-    return Number.isFinite(asNum) ? asNum : undefined
-  }
-  return undefined
-}
 
 const main = Effect.scoped(
   Effect.gen(function* () {
@@ -155,20 +148,40 @@ const main = Effect.scoped(
 
 const LoggerLayer = PrettyLoggerLive("info")
 
-const seedValue = parseSeedArg(process.argv)
-const SeedLayerLive = SeedLayer(seedValue)
-
-const AppLayer = Layer.mergeAll(
-  BunFileSystem.layer,
-  BunTerminal.layer,
+const makeAppLayer = (seed?: number) =>
+  Layer.mergeAll(
   LoggerLayer,
   InMemoryMetricsLive,
-  SeedLayerLive,
+  SeedLayer(seed),
   AppConfigLive
 )
 
-const program = Effect.scoped(
-  withCliErrorLogging(main).pipe(Effect.provide(AppLayer))
+const runTrainingProgram = (seed?: number) =>
+  withCliErrorLogging(main).pipe(Effect.provide(makeAppLayer(seed)))
+
+const seedOption = Options.integer("seed").pipe(
+  Options.optional,
+  Options.withDescription("Optional deterministic seed for model initialization.")
 )
 
-BunRuntime.runMain(program)
+const trainCommand = Command.make(
+  "effect-gpt",
+  { seed: seedOption },
+  Effect.fn("Cli.trainCommand")(function* ({ seed }) {
+    yield* runTrainingProgram(Option.getOrUndefined(seed))
+  })
+).pipe(
+  Command.withDescription("Train and run the Effect GPT model.")
+)
+
+const cli = Command.run(trainCommand, {
+  name: "effect-gpt",
+  version: "0.1.1"
+})
+
+export const makeProgram = (argv: ReadonlyArray<string>) =>
+  cli(argv).pipe(Effect.provide(BunContext.layer))
+
+if (import.meta.main) {
+  BunRuntime.runMain(makeProgram(process.argv))
+}
