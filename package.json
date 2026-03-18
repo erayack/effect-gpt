@@ -15,6 +15,7 @@
     "README.md"
   ],
   "scripts": {
+    "prepare": "effect-language-service patch",
     "prepublishOnly": "bun run build",
     "build": "tsc",
     "check": "tsc --noEmit",
@@ -24,14 +25,19 @@
     "test:unit": "bun test tests/ts"
   },
   "dependencies": {
-    "effect": "^3.16.0",
-    "@effect/platform": "^0.87.0",
-    "@effect/platform-bun": "^0.60.22",
-    "@effect/experimental": "^0.44.21",
-    "@effect/sql": "^0.33.21"
+    "@effect/cli": "^0.74.0",
+    "@effect/cluster": "^0.57.0",
+    "@effect/experimental": "^0.59.0",
+    "@effect/platform": "^0.95.0",
+    "@effect/platform-bun": "^0.88.0",
+    "@effect/rpc": "^0.74.0",
+    "@effect/sql": "^0.50.0",
+    "effect": "^3.20.0"
   },
   "devDependencies": {
+    "@effect/language-service": "^0.80.0",
     "@types/bun": "latest",
+    "effect-solutions": "^0.5.1",
     "typescript": "^5.6.0"
   }
 }

@@ -28,27 +28,23 @@ export interface TrainingConfig {
   readonly trainConcurrency?: number
 }
 
-interface TrainingConfigId {
-  readonly TrainingConfig: unique symbol
-}
-interface LLMServiceId {
-  readonly LLMService: unique symbol
-}
-
 export interface PreprocessSettings {
   readonly concurrency: number | "unbounded"
   readonly batchSize: number
 }
 
-interface PreprocessSettingsId {
-  readonly PreprocessSettings: unique symbol
-}
+class TrainingConfigTag extends Context.Tag("effect-gpt/training/TrainingConfig")<TrainingConfigTag, TrainingConfig>() {}
 
-export const TrainingConfig = Context.GenericTag<TrainingConfigId, TrainingConfig>("TrainingConfig")
-export const LLMService = Context.GenericTag<LLMServiceId, LLM>("LLMService")
-export const PreprocessSettings = Context.GenericTag<PreprocessSettingsId, PreprocessSettings>(
-  "PreprocessSettings"
-)
+class LLMServiceTag extends Context.Tag("effect-gpt/training/LLMService")<LLMServiceTag, LLM>() {}
+
+class PreprocessSettingsTag extends Context.Tag("effect-gpt/training/PreprocessSettings")<
+  PreprocessSettingsTag,
+  PreprocessSettings
+>() {}
+
+export const TrainingConfig = TrainingConfigTag
+export const LLMService = LLMServiceTag
+export const PreprocessSettings = PreprocessSettingsTag
 
 export const makeLLMLayer = (llm: LLM) => Layer.succeed(LLMService, llm)
 export const makeTrainingConfigLayer = (config: TrainingConfig) =>
@@ -57,11 +53,11 @@ export const makePreprocessSettingsLayer = (settings: PreprocessSettings) =>
   Layer.succeed(PreprocessSettings, settings)
 
 type TrainEnv =
-  | TrainingConfigId
-  | LLMServiceId
+  | TrainingConfigTag
+  | LLMServiceTag
   | LoggerServiceId
   | MetricsServiceId
-  | PreprocessSettingsId
+  | PreprocessSettingsTag
 
 const mapShapeError = <A, R>(effect: Effect.Effect<A, ShapeError, R>) =>
   effect.pipe(Effect.mapError(TrainingError.shape))
@@ -81,6 +77,11 @@ const wrapThrowing = <A>(
 const clampConcurrency = (value: number | undefined, fallback: number): number =>
   value === undefined ? fallback : Math.max(1, value)
 
+interface TrainingExample {
+  readonly inputIds: ReadonlyArray<number>
+  readonly targetIds: ReadonlyArray<number>
+}
+
 const trainWithStreamFactory = <E, R>(
   makeStream: () => Stream.Stream<string, E, R>
 ): Effect.Effect<void, TrainingErrorType, R | TrainEnv> =>
@@ -97,11 +98,11 @@ const trainWithStreamFactory = <E, R>(
         concurrency: config.preprocessConcurrency ?? "unbounded",
         batchSize: config.preprocessBatchSize ?? 1
       } satisfies PreprocessSettings
-    })
+    }).pipe(Effect.withSpan("Train.resolvePreprocessSettings"))
 
     const endTokenId = llm.vocab.encode("</s>")
     if (endTokenId._tag === "None") {
-      return yield* Effect.fail(TrainingError.config("End token </s> not found in vocabulary"))
+      return yield* TrainingError.config("End token </s> not found in vocabulary")
     }
 
     const clipNorm = config.clipNorm ?? 5.0
@@ -113,59 +114,56 @@ const trainWithStreamFactory = <E, R>(
     const lossGauge = yield* gauge("epoch_loss")
     const examplesCounter = yield* counter("examples_processed")
 
-    for (let epoch = 0; epoch < config.epochs; epoch++) {
+    const preprocess = Effect.fn("Train.preprocess")(function* (text: string) {
+      const tokens = [...tokenize(text, llm.vocab)]
+      if (tokens.length < 2) {
+        return Option.none<TrainingExample>()
+      }
+
+      return Option.some({
+        inputIds: tokens.slice(0, tokens.length - 1),
+        targetIds: tokens.slice(1)
+      } satisfies TrainingExample)
+    })
+
+    const runEpoch = Effect.fn("Train.runEpoch")(function* (epoch: number) {
       const epochResult = yield* timed(`epoch_${epoch}`, Effect.gen(function* () {
         const totalLossRef = yield* Ref.make(0)
         const totalExamplesRef = yield* Ref.make(0)
 
-        const preprocess = (text: string) =>
-          Effect.sync(() => {
-            const tokens = [...tokenize(text, llm.vocab)]
-            if (tokens.length < 2) {
-              return Option.none<{ inputIds: number[]; targetIds: number[] }>()
-            }
+        const preprocessed = makeStream().pipe(
+          Stream.mapError(TrainingError.fromUnknown),
+          Stream.mapChunks(Chunk.chunksOf(batchSize)),
+          Stream.flattenChunks,
+          Stream.mapEffect(preprocess, { concurrency }),
+          Stream.filterMap((value) => value)
+        )
 
-            return Option.some({
-              inputIds: tokens.slice(0, tokens.length - 1),
-              targetIds: tokens.slice(1)
-            })
+        const trainExample = Effect.fn("Train.trainExample")(function* ({ inputIds, targetIds }: TrainingExample) {
+          let input = T.fromArray(1, inputIds.length, inputIds)
+          for (const layer of llm.network) {
+            input = yield* mapShapeError(layer.forward(input))
+          }
+
+          const logits = input
+          const probs = yield* wrapThrowing(() => softmaxRows(logits), mapShapeUnknown)
+          const loss = yield* wrapThrowing(() => crossEntropyLoss(probs, targetIds), mapShapeUnknown)
+          yield* Ref.update(totalLossRef, (current) => current + loss)
+          yield* Ref.update(totalExamplesRef, (current) => current + 1)
+
+          let grads = yield* wrapThrowing(() => dLogits(probs, targetIds), mapShapeUnknown)
+          clipGlobalL2(grads, clipNorm)
+
+          for (let i = llm.network.length - 1; i >= 0; i--) {
+            grads = yield* mapShapeError(llm.network[i]!.backward(grads, config.learningRate))
+          }
+
+          const tokens = Ops.argmaxRows(probs)
+          const nextToken = tokens[tokens.length - 1]
+          if (nextToken === endTokenId.value) {
+            return
+          }
         })
-
-        const preprocessed = makeStream()
-          .pipe(
-            Stream.mapError(TrainingError.fromUnknown),
-            Stream.mapChunks(Chunk.chunksOf(batchSize)),
-            Stream.flattenChunks,
-            Stream.mapEffect(preprocess, { concurrency }),
-            Stream.filterMap((value) => value)
-          )
-
-        const trainExample = ({ inputIds, targetIds }: { inputIds: number[]; targetIds: number[] }) =>
-          Effect.gen(function* () {
-            let input = T.fromArray(1, inputIds.length, inputIds)
-            for (const layer of llm.network) {
-              input = yield* mapShapeError(layer.forward(input))
-            }
-
-            const logits = input
-            const probs = yield* wrapThrowing(() => softmaxRows(logits), mapShapeUnknown)
-            const loss = yield* wrapThrowing(() => crossEntropyLoss(probs, targetIds), mapShapeUnknown)
-            yield* Ref.update(totalLossRef, (current) => current + loss)
-            yield* Ref.update(totalExamplesRef, (current) => current + 1)
-
-            let grads = yield* wrapThrowing(() => dLogits(probs, targetIds), mapShapeUnknown)
-            clipGlobalL2(grads, clipNorm)
-
-            for (let i = llm.network.length - 1; i >= 0; i--) {
-              grads = yield* mapShapeError(llm.network[i]!.backward(grads, config.learningRate))
-            }
-
-            const tokens = Ops.argmaxRows(probs)
-            const nextToken = tokens[tokens.length - 1]
-            if (nextToken === endTokenId.value) {
-              return
-            }
-          })
 
         yield* Effect.scoped(
           Stream.runDrain(
@@ -177,7 +175,7 @@ const trainWithStreamFactory = <E, R>(
         const totalExamples = yield* Ref.get(totalExamplesRef)
         yield* examplesCounter.inc(totalExamples)
         return { totalLoss, totalExamples }
-      }))
+      }).pipe(Effect.withSpan("Train.epochLoop")))
 
       const { totalLoss, totalExamples } = epochResult.value
       const avgLoss = totalExamples > 0 ? totalLoss / totalExamples : 0
@@ -190,8 +188,12 @@ const trainWithStreamFactory = <E, R>(
         examples: totalExamples,
         durationMs: epochResult.durationMs
       })
+    })
+
+    for (let epoch = 0; epoch < config.epochs; epoch++) {
+      yield* runEpoch(epoch)
     }
-  })
+  }).pipe(Effect.withSpan("Train.trainWithStreamFactory"))
 
 export const train = (
   examples: ReadonlyArray<string>

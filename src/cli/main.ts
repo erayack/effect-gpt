@@ -15,21 +15,14 @@ import {
   makeTrainingConfigLayer,
   makePreprocessSettingsLayer
 } from "../training/train"
-import { MAX_SEQ_LEN, EMBEDDING_DIM, HIDDEN_DIM } from "../config"
-import { PrettyLoggerLive, info, error as logError } from "../services/Logger"
+import { AppConfig, AppConfigLive } from "../config"
+import { PrettyLoggerLive, info } from "../services/Logger"
 import { InMemoryMetricsLive, snapshot } from "../services/Metrics"
 import { SeedLayer, useSeedRng } from "../services/SeedLayer"
 import type { Rng } from "../tensor/random"
-import type { TrainingError } from "../errors"
-import { formatTrainingError } from "./errors"
+import { withCliErrorLogging } from "./program"
 
-const PRETRAIN_EPOCHS = 100
-const PRETRAIN_LR = 0.0005
-const FINETUNE_EPOCHS = 100
-const FINETUNE_LR = 0.0001
-
-const readLine = (prompt: string) =>
-  Effect.gen(function* () {
+const readLine = Effect.fn("Cli.readLine")(function* (prompt: string) {
     const terminal = yield* Terminal.Terminal
     yield* terminal.display(prompt)
     return yield* terminal.readLine
@@ -56,7 +49,7 @@ const repl = (llm: LLM) =>
         const prediction = yield* llm.predict(formattedInput)
         yield* terminal.display(`Model output: ${prediction}\n`)
       }
-    })
+    }).pipe(Effect.withSpan("Cli.repl"))
   )
 
 const parseSeedArg = (argv: string[]): number | undefined => {
@@ -72,11 +65,12 @@ const main = Effect.scoped(
   Effect.gen(function* () {
     const terminal = yield* Terminal.Terminal
     const rng: Rng = yield* useSeedRng()
+    const appConfig = yield* AppConfig
 
     const dataset = Dataset.load({
-      pretrainingPath: "data/pretraining_data.json",
-      chatPath: "data/chat_training_data.json",
-      format: "json"
+      pretrainingPath: appConfig.dataset.pretrainingPath,
+      chatPath: appConfig.dataset.chatPath,
+      format: appConfig.dataset.format
     })
 
     const vocabSet1 = yield* Vocab.processStreamForVocab(dataset.pretrainingStream())
@@ -88,18 +82,19 @@ const main = Effect.scoped(
 
     const vocabSize = vocab.words.length
     const network = [
-      new Embeddings(vocabSize, EMBEDDING_DIM, MAX_SEQ_LEN, rng),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM, rng),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM, rng),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM, rng),
-      new OutputProjection(EMBEDDING_DIM, vocabSize, rng)
+      new Embeddings(vocabSize, appConfig.model.embeddingDim, appConfig.model.maxSeqLen, rng),
+      ...Array.from(
+        { length: appConfig.model.transformerBlocks },
+        () => new TransformerBlock(appConfig.model.embeddingDim, appConfig.model.hiddenDim, rng)
+      ),
+      new OutputProjection(appConfig.model.embeddingDim, vocabSize, rng)
     ]
     const llm = new LLM(vocab, network)
 
     yield* terminal.display("\n=== MODEL INFORMATION ===\n")
     yield* terminal.display(`Network architecture: ${llm.networkDescription()}\n`)
     yield* terminal.display(
-      `Model configuration -> max_seq_len: ${MAX_SEQ_LEN}, embedding_dim: ${EMBEDDING_DIM}, hidden_dim: ${HIDDEN_DIM}\n`
+      `Model configuration -> max_seq_len: ${appConfig.model.maxSeqLen}, embedding_dim: ${appConfig.model.embeddingDim}, hidden_dim: ${appConfig.model.hiddenDim}\n`
     )
     yield* terminal.display(`Total parameters: ${llm.totalParameters()}\n`)
 
@@ -114,20 +109,32 @@ const main = Effect.scoped(
     const preprocessLayer = makePreprocessSettingsLayer({ concurrency: "unbounded", batchSize: 1 })
 
     yield* info("\n=== PRE-TRAINING MODEL ===")
-    yield* info(`Pre-training for ${PRETRAIN_EPOCHS} epochs with learning rate ${PRETRAIN_LR}`)
-    yield* trainStream(dataset.pretrainingStream).pipe(
-      Effect.provide(llmLayer),
-      Effect.provide(makeTrainingConfigLayer({ epochs: PRETRAIN_EPOCHS, learningRate: PRETRAIN_LR })),
-      Effect.provide(preprocessLayer)
+    yield* info(
+      `Pre-training for ${appConfig.training.pretraining.epochs} epochs with learning rate ${appConfig.training.pretraining.learningRate}`
     )
+    const pretrainingLayer = Layer.mergeAll(
+      llmLayer,
+      makeTrainingConfigLayer({
+        epochs: appConfig.training.pretraining.epochs,
+        learningRate: appConfig.training.pretraining.learningRate
+      }),
+      preprocessLayer
+    )
+    yield* trainStream(dataset.pretrainingStream).pipe(Effect.provide(pretrainingLayer))
 
     yield* info("\n=== INSTRUCTION TUNING ===")
-    yield* info(`Instruction tuning for ${FINETUNE_EPOCHS} epochs with learning rate ${FINETUNE_LR}`)
-    yield* trainStream(dataset.chatStream).pipe(
-      Effect.provide(llmLayer),
-      Effect.provide(makeTrainingConfigLayer({ epochs: FINETUNE_EPOCHS, learningRate: FINETUNE_LR })),
-      Effect.provide(preprocessLayer)
+    yield* info(
+      `Instruction tuning for ${appConfig.training.finetuning.epochs} epochs with learning rate ${appConfig.training.finetuning.learningRate}`
     )
+    const finetuningLayer = Layer.mergeAll(
+      llmLayer,
+      makeTrainingConfigLayer({
+        epochs: appConfig.training.finetuning.epochs,
+        learningRate: appConfig.training.finetuning.learningRate
+      }),
+      preprocessLayer
+    )
+    yield* trainStream(dataset.chatStream).pipe(Effect.provide(finetuningLayer))
 
     const metrics = yield* snapshot()
     yield* info("Training complete", {
@@ -143,7 +150,7 @@ const main = Effect.scoped(
     yield* terminal.display("======================\n")
 
     yield* repl(llm)
-  })
+  }).pipe(Effect.withSpan("Cli.main"))
 )
 
 const LoggerLayer = PrettyLoggerLive("info")
@@ -151,13 +158,17 @@ const LoggerLayer = PrettyLoggerLive("info")
 const seedValue = parseSeedArg(process.argv)
 const SeedLayerLive = SeedLayer(seedValue)
 
-const AppLayer = Layer.mergeAll(BunFileSystem.layer, BunTerminal.layer, LoggerLayer, InMemoryMetricsLive, SeedLayerLive)
+const AppLayer = Layer.mergeAll(
+  BunFileSystem.layer,
+  BunTerminal.layer,
+  LoggerLayer,
+  InMemoryMetricsLive,
+  SeedLayerLive,
+  AppConfigLive
+)
 
 const program = Effect.scoped(
-  main.pipe(
-    Effect.provide(AppLayer),
-    Effect.catchAll((err) => logError(formatTrainingError(err as TrainingError)).pipe(Effect.provide(AppLayer)))
-  )
+  withCliErrorLogging(main).pipe(Effect.provide(AppLayer))
 )
 
 BunRuntime.runMain(program)
