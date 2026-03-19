@@ -38,7 +38,10 @@ export {
   LLMService,
   TrainingConfig,
   makeLLMLayer,
-  makeTrainingConfigLayer
+  makeTrainingConfigLayer,
+  makePreprocessSettingsLayer,
+  DefaultPreprocessSettings,
+  DefaultPreprocessSettingsLive
 } from "./training/train"
 
 export type {

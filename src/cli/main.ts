@@ -5,6 +5,7 @@ import * as Option from "effect/Option"
 import { Terminal } from "@effect/platform"
 import { Command, Options } from "@effect/cli"
 import { BunContext, BunRuntime } from "@effect/platform-bun"
+import pkg from "../../package.json" with { type: "json" }
 import { Dataset } from "../data/Dataset"
 import { Vocab } from "../vocab/Vocab"
 import { LLM } from "../model/LLM"
@@ -15,7 +16,7 @@ import {
   trainStream,
   makeLLMLayer,
   makeTrainingConfigLayer,
-  makePreprocessSettingsLayer
+  DefaultPreprocessSettingsLive
 } from "../training/train"
 import { AppConfig, AppConfigLive } from "../config"
 import { PrettyLoggerLive, info } from "../services/Logger"
@@ -99,35 +100,39 @@ const main = Effect.scoped(
     yield* terminal.display(`Output: ${beforeOutput}\n`)
 
     const llmLayer = makeLLMLayer(llm)
-    const preprocessLayer = makePreprocessSettingsLayer({ concurrency: "unbounded", batchSize: 1 })
+    const baseTrainingLayer = Layer.mergeAll(llmLayer, DefaultPreprocessSettingsLive)
+    const runTrainingPhase = Effect.fn("Cli.runTrainingPhase")(function* (
+      name: string,
+      makeDatasetStream: typeof dataset.pretrainingStream,
+      trainingConfig: {
+        readonly epochs: number
+        readonly learningRate: number
+      }
+    ) {
+      yield* info(`\n=== ${name} ===`)
+      yield* info(
+        `${name} for ${trainingConfig.epochs} epochs with learning rate ${trainingConfig.learningRate}`
+      )
+      const trainingLayer = Layer.mergeAll(
+        baseTrainingLayer,
+        makeTrainingConfigLayer({
+          epochs: trainingConfig.epochs,
+          learningRate: trainingConfig.learningRate
+        })
+      )
+      yield* trainStream(makeDatasetStream).pipe(Effect.provide(trainingLayer))
+    })
 
-    yield* info("\n=== PRE-TRAINING MODEL ===")
-    yield* info(
-      `Pre-training for ${appConfig.training.pretraining.epochs} epochs with learning rate ${appConfig.training.pretraining.learningRate}`
+    yield* runTrainingPhase(
+      "PRE-TRAINING MODEL",
+      dataset.pretrainingStream,
+      appConfig.training.pretraining
     )
-    const pretrainingLayer = Layer.mergeAll(
-      llmLayer,
-      makeTrainingConfigLayer({
-        epochs: appConfig.training.pretraining.epochs,
-        learningRate: appConfig.training.pretraining.learningRate
-      }),
-      preprocessLayer
+    yield* runTrainingPhase(
+      "INSTRUCTION TUNING",
+      dataset.chatStream,
+      appConfig.training.finetuning
     )
-    yield* trainStream(dataset.pretrainingStream).pipe(Effect.provide(pretrainingLayer))
-
-    yield* info("\n=== INSTRUCTION TUNING ===")
-    yield* info(
-      `Instruction tuning for ${appConfig.training.finetuning.epochs} epochs with learning rate ${appConfig.training.finetuning.learningRate}`
-    )
-    const finetuningLayer = Layer.mergeAll(
-      llmLayer,
-      makeTrainingConfigLayer({
-        epochs: appConfig.training.finetuning.epochs,
-        learningRate: appConfig.training.finetuning.learningRate
-      }),
-      preprocessLayer
-    )
-    yield* trainStream(dataset.chatStream).pipe(Effect.provide(finetuningLayer))
 
     const metrics = yield* snapshot()
     yield* info("Training complete", {
@@ -150,11 +155,11 @@ const LoggerLayer = PrettyLoggerLive("info")
 
 const makeAppLayer = (seed?: number) =>
   Layer.mergeAll(
-  LoggerLayer,
-  InMemoryMetricsLive,
-  SeedLayer(seed),
-  AppConfigLive
-)
+    LoggerLayer,
+    InMemoryMetricsLive,
+    SeedLayer(seed),
+    AppConfigLive
+  )
 
 const runTrainingProgram = (seed?: number) =>
   withCliErrorLogging(main).pipe(Effect.provide(makeAppLayer(seed)))
@@ -176,7 +181,7 @@ const trainCommand = Command.make(
 
 const cli = Command.run(trainCommand, {
   name: "effect-gpt",
-  version: "0.1.1"
+  version: pkg.version
 })
 
 export const makeProgram = (argv: ReadonlyArray<string>) =>

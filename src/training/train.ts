@@ -23,8 +23,6 @@ export interface TrainingConfig {
   readonly epochs: number
   readonly learningRate: number
   readonly clipNorm?: number
-  readonly preprocessConcurrency?: number | "unbounded"
-  readonly preprocessBatchSize?: number
   readonly trainConcurrency?: number
 }
 
@@ -51,6 +49,11 @@ export const makeTrainingConfigLayer = (config: TrainingConfig) =>
   Layer.succeed(TrainingConfig, config)
 export const makePreprocessSettingsLayer = (settings: PreprocessSettings) =>
   Layer.succeed(PreprocessSettings, settings)
+export const DefaultPreprocessSettings: PreprocessSettings = Object.freeze({
+  concurrency: "unbounded",
+  batchSize: 1
+})
+export const DefaultPreprocessSettingsLive = makePreprocessSettingsLayer(DefaultPreprocessSettings)
 
 type TrainEnv =
   | TrainingConfigTag
@@ -88,17 +91,7 @@ const trainWithStreamFactory = <E, R>(
   Effect.gen(function* () {
     const llm = yield* LLMService
     const config = yield* TrainingConfig
-    const preprocessSettings = yield* Effect.gen(function* () {
-      const env = (yield* Effect.context<R | TrainEnv>()) as Context.Context<R | TrainEnv>
-      const maybeSettings = Context.getOption(env, PreprocessSettings)
-      if (maybeSettings._tag === "Some") {
-        return maybeSettings.value
-      }
-      return {
-        concurrency: config.preprocessConcurrency ?? "unbounded",
-        batchSize: config.preprocessBatchSize ?? 1
-      } satisfies PreprocessSettings
-    }).pipe(Effect.withSpan("Train.resolvePreprocessSettings"))
+    const preprocessSettings = yield* PreprocessSettings
 
     const endTokenId = llm.vocab.encode("</s>")
     if (endTokenId._tag === "None") {
