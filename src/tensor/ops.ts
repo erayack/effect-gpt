@@ -208,22 +208,30 @@ export const mapScalar = (t: Tensor2D, fn: (val: number) => number): Tensor2D =>
 
 export const softmaxRows = (t: Tensor2D): Tensor2D => {
   const data = new Float32Array(t.data.length)
+  const tData = t.data
+  const cols = t.cols
+
   for (let i = 0; i < t.rows; i++) {
+    const rowOffset = i * cols
     let maxVal = -Infinity
-    for (let j = 0; j < t.cols; j++) {
-      const val = T.get(t, i, j)
+
+    for (let j = 0; j < cols; j++) {
+      const val = tData[rowOffset + j]
       if (val > maxVal) maxVal = val
     }
+
     let sumExp = 0
-    for (let j = 0; j < t.cols; j++) {
-      const exp = Math.exp(T.get(t, i, j) - maxVal)
-      data[i * t.cols + j] = exp
+    for (let j = 0; j < cols; j++) {
+      const exp = Math.exp(tData[rowOffset + j] - maxVal)
+      data[rowOffset + j] = exp
       sumExp += exp
     }
-    for (let j = 0; j < t.cols; j++) {
-      data[i * t.cols + j] /= sumExp
+
+    for (let j = 0; j < cols; j++) {
+      data[rowOffset + j] /= sumExp
     }
   }
+
   return T.make(t.rows, t.cols, data)
 }
 
@@ -277,18 +285,25 @@ export const relu = (t: Tensor2D): Tensor2D => {
 
 export const argmaxRows = (t: Tensor2D): ReadonlyArray<number> => {
   const result: Array<number> = []
+  const tData = t.data
+  const cols = t.cols
+
   for (let i = 0; i < t.rows; i++) {
+    const rowOffset = i * cols
     let maxIdx = 0
-    let maxVal = T.get(t, i, 0)
-    for (let j = 1; j < t.cols; j++) {
-      const val = T.get(t, i, j)
+    let maxVal = tData[rowOffset]
+
+    for (let j = 1; j < cols; j++) {
+      const val = tData[rowOffset + j]
       if (val > maxVal) {
         maxVal = val
         maxIdx = j
       }
     }
+
     result.push(maxIdx)
   }
+
   return result
 }
 

@@ -85,10 +85,6 @@ export class LLM {
       }
 
       for (let step = 0; step < MAX_SEQ_LEN - inputLen; step++) {
-        if (outputTokens.length >= MAX_SEQ_LEN - 1) {
-          break
-        }
-
         const tokenInput = T.fromArray(1, tokenized.length, tokenized)
         let input: Tensor2D = tokenInput
 
@@ -103,12 +99,16 @@ export class LLM {
         }
 
         const lastRowStart = (logits.rows - 1) * logits.cols
-        const lastLogitData = logits.data.slice(lastRowStart, lastRowStart + logits.cols)
-        const lastLogit = T.make(1, logits.cols, lastLogitData)
+        let nextToken = 0
+        let maxVal = logits.data[lastRowStart]
 
-        const probs = Ops.softmaxRows(lastLogit)
-        const tokens = Ops.argmaxRows(probs)
-        const nextToken = tokens[tokens.length - 1]
+        for (let j = 1; j < logits.cols; j++) {
+          const val = logits.data[lastRowStart + j]
+          if (val > maxVal) {
+            maxVal = val
+            nextToken = j
+          }
+        }
 
         outputTokens.push(nextToken)
         tokenized.push(nextToken)
