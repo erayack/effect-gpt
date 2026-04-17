@@ -13,23 +13,45 @@ export class ShapeError extends Error {
   }
 }
 
-export const matMul = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
-  Effect.sync(() => {
-    if (a.cols !== b.rows) {
-      throw new ShapeError(`matMul: a.cols (${a.cols}) !== b.rows (${b.rows})`)
-    }
-    const result = T.zeros(a.rows, b.cols)
-    for (let i = 0; i < a.rows; i++) {
-      for (let j = 0; j < b.cols; j++) {
-        let sum = 0
-        for (let k = 0; k < a.cols; k++) {
-          sum += T.get(a, i, k) * T.get(b, k, j)
+export const matMul = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> => {
+  if (a.cols !== b.rows) {
+    return Effect.fail(new ShapeError(`matMul: a.cols (${a.cols}) !== b.rows (${b.rows})`))
+  }
+
+  return Effect.sync(() => {
+    const aRows = a.rows
+    const aCols = a.cols
+    const bCols = b.cols
+
+    const aData = a.data
+    const bData = b.data
+    const resultData = new Float32Array(aRows * bCols)
+
+    for (let i = 0; i < aRows; i++) {
+      const resultRowOffset = i * bCols
+      const aRowOffset = i * aCols
+
+      for (let k = 0; k < aCols; k++) {
+        const aVal = aData[aRowOffset + k]
+        const bRowOffset = k * bCols
+
+        let j = 0
+        const limit = bCols - (bCols % 4)
+        for (; j < limit; j += 4) {
+          resultData[resultRowOffset + j] += aVal * bData[bRowOffset + j]
+          resultData[resultRowOffset + j + 1] += aVal * bData[bRowOffset + j + 1]
+          resultData[resultRowOffset + j + 2] += aVal * bData[bRowOffset + j + 2]
+          resultData[resultRowOffset + j + 3] += aVal * bData[bRowOffset + j + 3]
         }
-        T.set(result, i, j, sum)
+        for (; j < bCols; j++) {
+          resultData[resultRowOffset + j] += aVal * bData[bRowOffset + j]
+        }
       }
     }
-    return result
-  }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+
+    return T.make(aRows, bCols, resultData)
+  })
+}
 
 export const add = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
   Effect.sync(() => {
