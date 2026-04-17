@@ -22,6 +22,24 @@ bun run dev      # train + generate via cli
 bun test         # run test suite
 ```
 
+## Configuration
+
+Runtime configuration is loaded from environment variables. Invalid values fail fast at startup.
+
+| Variable | Default | Constraint | Description |
+|---|---:|---|---|
+| `EFFECT_GPT_MAX_SEQ_LEN` | `80` | positive integer | Maximum token sequence length. |
+| `EFFECT_GPT_EMBEDDING_DIM` | `128` | positive integer | Embedding dimension. |
+| `EFFECT_GPT_HIDDEN_DIM` | `256` | positive integer | Feed-forward hidden dimension. |
+| `EFFECT_GPT_TRANSFORMER_BLOCKS` | `3` | positive integer | Number of transformer blocks. |
+| `EFFECT_GPT_PRETRAINING_PATH` | `data/pretraining_data.json` | non-empty string | Path to pretraining dataset. |
+| `EFFECT_GPT_CHAT_PATH` | `data/chat_training_data.json` | non-empty string | Path to instruction-tuning dataset. |
+| `EFFECT_GPT_DATASET_FORMAT` | `json` | `json` or `csv` | Dataset format. |
+| `EFFECT_GPT_PRETRAIN_EPOCHS` | `100` | positive integer | Pretraining epochs. |
+| `EFFECT_GPT_PRETRAIN_LR` | `0.0005` | positive number | Pretraining learning rate. |
+| `EFFECT_GPT_FINETUNE_EPOCHS` | `100` | positive integer | Instruction-tuning epochs. |
+| `EFFECT_GPT_FINETUNE_LR` | `0.0001` | positive number | Instruction-tuning learning rate. |
+
 ## What This Is
 
 A complete LLM implementation including:

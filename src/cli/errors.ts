@@ -1,5 +1,7 @@
+import * as Effect from "effect/Effect"
 import * as Cause from "effect/Cause"
-import type { TrainingError } from "../errors"
+import { TrainingError } from "../errors"
+import type { TrainingError as TrainingErrorType } from "../errors"
 
 const formatUnknown = (err: unknown): string => {
   if (Cause.isCause(err)) return Cause.pretty(err)
@@ -7,45 +9,34 @@ const formatUnknown = (err: unknown): string => {
   return String(err)
 }
 
-export const formatTrainingError = (err: TrainingError | unknown): string => {
-  if (err && typeof err === "object" && "_tag" in err) {
-    const tagged = err as { _tag: string }
-    switch (tagged._tag) {
-      case "TrainingDatasetError": {
-        const e = err as TrainingError & { cause: { path?: string; error?: unknown; message?: string; _tag?: string } }
+const formatKnownTrainingError = (error: TrainingErrorType): Effect.Effect<string> =>
+  Effect.fail(error).pipe(
+    Effect.catchTags({
+      TrainingDatasetError: (e) => {
         const location = e.cause.path ? ` (${e.cause.path})` : ""
         const reason = e.cause._tag ?? "dataset"
         const detail =
           e.cause.error !== undefined
             ? typeof e.cause.error === "object" && e.cause.error !== null && "message" in e.cause.error
-              ? (e.cause.error as any).message
+              ? (e.cause.error as { message: string }).message
               : String(e.cause.error)
-            : e.cause.message ?? ""
-        return `Dataset error${location}: ${reason}${detail ? ` - ${detail}` : ""}`
-      }
-      case "TrainingShapeError": {
-        const e = err as any
-        return `Shape error: ${e.cause?.message ?? formatUnknown(e.cause)}`
-      }
-      case "TrainingTokenizerError": {
-        const e = err as any
-        return `Tokenizer error: ${e.message}`
-      }
-      case "TrainingOptimizerError": {
-        const e = err as any
-        return `Optimizer error: ${e.message}`
-      }
-      case "TrainingConfigError": {
-        const e = err as any
-        return `Configuration error: ${e.message}`
-      }
-      case "TrainingUnknownError": {
-        const e = err as any
-        return `Unexpected training error: ${formatUnknown(e.cause)}`
-      }
-      default:
-        return `Unexpected error (${tagged._tag}): ${formatUnknown(err)}`
-    }
-  }
-  return `Unexpected error: ${formatUnknown(err)}`
-}
+            : "message" in e.cause && typeof e.cause.message === "string"
+              ? e.cause.message
+              : ""
+        return Effect.succeed(`Dataset error${location}: ${reason}${detail ? ` - ${detail}` : ""}`)
+      },
+      TrainingShapeError: (e) =>
+        Effect.succeed(`Shape error: ${e.cause?.message ?? formatUnknown(e.cause)}`),
+      TrainingTokenizerError: (e) =>
+        Effect.succeed(`Tokenizer error: ${e.message}`),
+      TrainingOptimizerError: (e) =>
+        Effect.succeed(`Optimizer error: ${e.message}`),
+      TrainingConfigError: (e) =>
+        Effect.succeed(`Configuration error: ${e.message}`),
+      TrainingUnknownError: (e) =>
+        Effect.succeed(`Unexpected training error: ${formatUnknown(e.cause)}`)
+    })
+  )
+
+export const formatTrainingError = (error: TrainingErrorType | unknown): string =>
+  Effect.runSync(formatKnownTrainingError(TrainingError.fromUnknown(error)))

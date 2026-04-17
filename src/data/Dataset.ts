@@ -42,7 +42,7 @@ export class DatasetParseError extends Data.TaggedError("DatasetParseError")<{
 }> {}
 
 const TrainingItemSchema = Schema.String
-const decodeTrainingItem = Schema.decodeUnknown(TrainingItemSchema)
+const decodeTrainingItemJson = Schema.decodeUnknown(Schema.parseJson(TrainingItemSchema))
 
 const makeFileStream = (path: string) =>
   Effect.flatMap(FileSystem.FileSystem, (fs) => Effect.succeed(fs.stream(path)))
@@ -61,21 +61,16 @@ const parseJsonLine = (path: string, rawLine: string): Effect.Effect<Option.Opti
   Effect.gen(function* () {
     const trimmed = rawLine.trim()
     if (trimmed === "[" || trimmed === "]" || trimmed.length === 0) {
-      return yield* Effect.succeed<Option.Option<string>>(Option.none())
+      return Option.none()
     }
 
     const withoutComma = trimmed.endsWith(",") ? trimmed.slice(0, -1) : trimmed
 
-    const parsed: unknown = yield* Effect.try({
-      try: () => JSON.parse(withoutComma),
-      catch: (error) => new DatasetParseError({ path, error })
-    })
-
-    const decoded: string = yield* decodeTrainingItem(parsed).pipe(
+    const decoded: string = yield* decodeTrainingItemJson(withoutComma).pipe(
       Effect.mapError((error) => new DatasetParseError({ path, error }))
     )
 
-    return yield* Effect.succeed<Option.Option<string>>(Option.some(decoded))
+    return Option.some(decoded)
   })
 
 const jsonStream = (path: string) =>
@@ -118,7 +113,7 @@ const parseCsvLine = (path: string, rawLine: string): Effect.Effect<Option.Optio
   Effect.gen(function* () {
     const trimmed = rawLine.trim()
     if (trimmed.length === 0) {
-      return yield* Effect.succeed<Option.Option<string>>(Option.none())
+      return Option.none()
     }
 
     const joined = yield* Effect.try({
@@ -126,7 +121,7 @@ const parseCsvLine = (path: string, rawLine: string): Effect.Effect<Option.Optio
       catch: (error) => new DatasetParseError({ path, error })
     })
 
-    return yield* Effect.succeed<Option.Option<string>>(Option.some(joined))
+    return Option.some(joined)
   })
 
 const csvStream = (path: string) =>
@@ -141,8 +136,7 @@ const collectAll = (
   stream: Stream.Stream<string, DatasetLoadError | DatasetParseError, FileSystem.FileSystem>
 ) =>
   Stream.runCollect(stream).pipe(
-    Effect.map((chunk) => Array.from(chunk)),
-    Effect.catchAll((error) => Effect.fail(error))
+    Effect.map((chunk) => Array.from(chunk))
   )
 
 export const Dataset = {

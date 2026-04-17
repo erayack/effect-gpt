@@ -20,11 +20,10 @@ export interface LoggerService {
   readonly error: (message: string, data?: Record<string, unknown>) => Effect.Effect<void>
 }
 
-export interface LoggerServiceId {
-  readonly LoggerService: unique symbol
-}
+class LoggerTag extends Context.Tag("effect-gpt/services/Logger")<LoggerTag, LoggerService>() {}
 
-export const Logger = Context.GenericTag<LoggerServiceId, LoggerService>("LoggerService")
+export const Logger = LoggerTag
+export type LoggerServiceId = LoggerTag
 
 type Formatter = (level: LogLevel, message: string, data?: Record<string, unknown>) => string
 

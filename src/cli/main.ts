@@ -1,8 +1,11 @@
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as HashSet from "effect/HashSet"
+import * as Option from "effect/Option"
 import { Terminal } from "@effect/platform"
-import { BunFileSystem, BunRuntime, BunTerminal } from "@effect/platform-bun"
+import { Command, Options } from "@effect/cli"
+import { BunContext, BunRuntime } from "@effect/platform-bun"
+import pkg from "../../package.json" with { type: "json" }
 import { Dataset } from "../data/Dataset"
 import { Vocab } from "../vocab/Vocab"
 import { LLM } from "../model/LLM"
@@ -13,23 +16,16 @@ import {
   trainStream,
   makeLLMLayer,
   makeTrainingConfigLayer,
-  makePreprocessSettingsLayer
+  DefaultPreprocessSettingsLive
 } from "../training/train"
-import { MAX_SEQ_LEN, EMBEDDING_DIM, HIDDEN_DIM } from "../config"
-import { PrettyLoggerLive, info, error as logError } from "../services/Logger"
+import { AppConfig, AppConfigLive } from "../config"
+import { PrettyLoggerLive, info } from "../services/Logger"
 import { InMemoryMetricsLive, snapshot } from "../services/Metrics"
 import { SeedLayer, useSeedRng } from "../services/SeedLayer"
 import type { Rng } from "../tensor/random"
-import type { TrainingError } from "../errors"
-import { formatTrainingError } from "./errors"
+import { withCliErrorLogging } from "./program"
 
-const PRETRAIN_EPOCHS = 100
-const PRETRAIN_LR = 0.0005
-const FINETUNE_EPOCHS = 100
-const FINETUNE_LR = 0.0001
-
-const readLine = (prompt: string) =>
-  Effect.gen(function* () {
+const readLine = Effect.fn("Cli.readLine")(function* (prompt: string) {
     const terminal = yield* Terminal.Terminal
     yield* terminal.display(prompt)
     return yield* terminal.readLine
@@ -56,27 +52,19 @@ const repl = (llm: LLM) =>
         const prediction = yield* llm.predict(formattedInput)
         yield* terminal.display(`Model output: ${prediction}\n`)
       }
-    })
+    }).pipe(Effect.withSpan("Cli.repl"))
   )
-
-const parseSeedArg = (argv: string[]): number | undefined => {
-  const seedIndex = argv.findIndex((arg) => arg === "--seed")
-  if (seedIndex >= 0 && seedIndex < argv.length - 1) {
-    const asNum = Number(argv[seedIndex + 1])
-    return Number.isFinite(asNum) ? asNum : undefined
-  }
-  return undefined
-}
 
 const main = Effect.scoped(
   Effect.gen(function* () {
     const terminal = yield* Terminal.Terminal
     const rng: Rng = yield* useSeedRng()
+    const appConfig = yield* AppConfig
 
     const dataset = Dataset.load({
-      pretrainingPath: "data/pretraining_data.json",
-      chatPath: "data/chat_training_data.json",
-      format: "json"
+      pretrainingPath: appConfig.dataset.pretrainingPath,
+      chatPath: appConfig.dataset.chatPath,
+      format: appConfig.dataset.format
     })
 
     const vocabSet1 = yield* Vocab.processStreamForVocab(dataset.pretrainingStream())
@@ -88,18 +76,19 @@ const main = Effect.scoped(
 
     const vocabSize = vocab.words.length
     const network = [
-      new Embeddings(vocabSize, EMBEDDING_DIM, MAX_SEQ_LEN, rng),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM, rng),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM, rng),
-      new TransformerBlock(EMBEDDING_DIM, HIDDEN_DIM, rng),
-      new OutputProjection(EMBEDDING_DIM, vocabSize, rng)
+      new Embeddings(vocabSize, appConfig.model.embeddingDim, appConfig.model.maxSeqLen, rng),
+      ...Array.from(
+        { length: appConfig.model.transformerBlocks },
+        () => new TransformerBlock(appConfig.model.embeddingDim, appConfig.model.hiddenDim, rng)
+      ),
+      new OutputProjection(appConfig.model.embeddingDim, vocabSize, rng)
     ]
     const llm = new LLM(vocab, network)
 
     yield* terminal.display("\n=== MODEL INFORMATION ===\n")
     yield* terminal.display(`Network architecture: ${llm.networkDescription()}\n`)
     yield* terminal.display(
-      `Model configuration -> max_seq_len: ${MAX_SEQ_LEN}, embedding_dim: ${EMBEDDING_DIM}, hidden_dim: ${HIDDEN_DIM}\n`
+      `Model configuration -> max_seq_len: ${appConfig.model.maxSeqLen}, embedding_dim: ${appConfig.model.embeddingDim}, hidden_dim: ${appConfig.model.hiddenDim}\n`
     )
     yield* terminal.display(`Total parameters: ${llm.totalParameters()}\n`)
 
@@ -111,22 +100,38 @@ const main = Effect.scoped(
     yield* terminal.display(`Output: ${beforeOutput}\n`)
 
     const llmLayer = makeLLMLayer(llm)
-    const preprocessLayer = makePreprocessSettingsLayer({ concurrency: "unbounded", batchSize: 1 })
+    const baseTrainingLayer = Layer.mergeAll(llmLayer, DefaultPreprocessSettingsLive)
+    const runTrainingPhase = Effect.fn("Cli.runTrainingPhase")(function* (
+      name: string,
+      makeDatasetStream: typeof dataset.pretrainingStream,
+      trainingConfig: {
+        readonly epochs: number
+        readonly learningRate: number
+      }
+    ) {
+      yield* info(`\n=== ${name} ===`)
+      yield* info(
+        `${name} for ${trainingConfig.epochs} epochs with learning rate ${trainingConfig.learningRate}`
+      )
+      const trainingLayer = Layer.mergeAll(
+        baseTrainingLayer,
+        makeTrainingConfigLayer({
+          epochs: trainingConfig.epochs,
+          learningRate: trainingConfig.learningRate
+        })
+      )
+      yield* trainStream(makeDatasetStream).pipe(Effect.provide(trainingLayer))
+    })
 
-    yield* info("\n=== PRE-TRAINING MODEL ===")
-    yield* info(`Pre-training for ${PRETRAIN_EPOCHS} epochs with learning rate ${PRETRAIN_LR}`)
-    yield* trainStream(dataset.pretrainingStream).pipe(
-      Effect.provide(llmLayer),
-      Effect.provide(makeTrainingConfigLayer({ epochs: PRETRAIN_EPOCHS, learningRate: PRETRAIN_LR })),
-      Effect.provide(preprocessLayer)
+    yield* runTrainingPhase(
+      "PRE-TRAINING MODEL",
+      dataset.pretrainingStream,
+      appConfig.training.pretraining
     )
-
-    yield* info("\n=== INSTRUCTION TUNING ===")
-    yield* info(`Instruction tuning for ${FINETUNE_EPOCHS} epochs with learning rate ${FINETUNE_LR}`)
-    yield* trainStream(dataset.chatStream).pipe(
-      Effect.provide(llmLayer),
-      Effect.provide(makeTrainingConfigLayer({ epochs: FINETUNE_EPOCHS, learningRate: FINETUNE_LR })),
-      Effect.provide(preprocessLayer)
+    yield* runTrainingPhase(
+      "INSTRUCTION TUNING",
+      dataset.chatStream,
+      appConfig.training.finetuning
     )
 
     const metrics = yield* snapshot()
@@ -143,21 +148,45 @@ const main = Effect.scoped(
     yield* terminal.display("======================\n")
 
     yield* repl(llm)
-  })
+  }).pipe(Effect.withSpan("Cli.main"))
 )
 
 const LoggerLayer = PrettyLoggerLive("info")
 
-const seedValue = parseSeedArg(process.argv)
-const SeedLayerLive = SeedLayer(seedValue)
-
-const AppLayer = Layer.mergeAll(BunFileSystem.layer, BunTerminal.layer, LoggerLayer, InMemoryMetricsLive, SeedLayerLive)
-
-const program = Effect.scoped(
-  main.pipe(
-    Effect.provide(AppLayer),
-    Effect.catchAll((err) => logError(formatTrainingError(err as TrainingError)).pipe(Effect.provide(AppLayer)))
+const makeAppLayer = (seed?: number) =>
+  Layer.mergeAll(
+    LoggerLayer,
+    InMemoryMetricsLive,
+    SeedLayer(seed),
+    AppConfigLive
   )
+
+const runTrainingProgram = (seed?: number) =>
+  withCliErrorLogging(main).pipe(Effect.provide(makeAppLayer(seed)))
+
+const seedOption = Options.integer("seed").pipe(
+  Options.optional,
+  Options.withDescription("Optional deterministic seed for model initialization.")
 )
 
-BunRuntime.runMain(program)
+const trainCommand = Command.make(
+  "effect-gpt",
+  { seed: seedOption },
+  Effect.fn("Cli.trainCommand")(function* ({ seed }) {
+    yield* runTrainingProgram(Option.getOrUndefined(seed))
+  })
+).pipe(
+  Command.withDescription("Train and run the Effect GPT model.")
+)
+
+const cli = Command.run(trainCommand, {
+  name: "effect-gpt",
+  version: pkg.version
+})
+
+export const makeProgram = (argv: ReadonlyArray<string>) =>
+  cli(argv).pipe(Effect.provide(BunContext.layer))
+
+if (import.meta.main) {
+  BunRuntime.runMain(makeProgram(process.argv))
+}
