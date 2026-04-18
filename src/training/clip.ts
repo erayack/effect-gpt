@@ -6,9 +6,10 @@ export const clipGlobalL2 = (grads: Tensor2D, maxNorm: number): void => {
     const v = grads.data[i]
     sumSq += v * v
   }
-  const norm = Math.sqrt(sumSq)
-  if (norm > maxNorm) {
-    const scale = maxNorm / norm
+
+  const maxNormSq = maxNorm * maxNorm
+  if (sumSq > maxNormSq) {
+    const scale = maxNorm / Math.sqrt(sumSq)
     for (let i = 0; i < grads.data.length; i++) {
       grads.data[i] *= scale
     }

@@ -78,29 +78,37 @@ export class Embeddings implements ModelLayer {
         tokenIds.push(Math.trunc(input.data[i]))
       }
 
-      const tokenGrads = T.zeros(this.tokenEmbeddings.rows, this.tokenEmbeddings.cols)
-      const positionalGrads = T.zeros(this.positionalEmbeddings.rows, this.positionalEmbeddings.cols)
+      const cols = dOut.cols
+      const tokenRowToGradIndex = new Map<number, number>()
+      const tokenRows: Array<number> = []
+      let uniqueTokenRows = 0
 
-      const seqLen = tokenIds.length
-      for (let i = 0; i < seqLen; i++) {
+      for (let i = 0; i < tokenIds.length; i++) {
         const tokenId = tokenIds[i]
         if (tokenId < 0 || tokenId >= this.tokenEmbeddings.rows) {
           return yield* Effect.fail(
             new Ops.ShapeError(`Token ID ${tokenId} out of bounds for vocab size ${this.tokenEmbeddings.rows}`)
           )
         }
-        const rowOffset = i * dOut.cols
-        const tokenOffset = tokenId * tokenGrads.cols
-        const posOffset = i * positionalGrads.cols
-        for (let j = 0; j < dOut.cols; j++) {
-          const grad = dOut.data[rowOffset + j]
-          tokenGrads.data[tokenOffset + j] += grad
-          positionalGrads.data[posOffset + j] += grad
+        if (!tokenRowToGradIndex.has(tokenId)) {
+          tokenRowToGradIndex.set(tokenId, uniqueTokenRows++)
+          tokenRows.push(tokenId)
         }
       }
 
-      this.tokenOptimizer.step(this.tokenEmbeddings, tokenGrads, lr)
-      this.positionalOptimizer.step(this.positionalEmbeddings, positionalGrads, lr)
+      const tokenGradRows = new Float32Array(uniqueTokenRows * cols)
+      for (let i = 0; i < tokenIds.length; i++) {
+        const gradRow = tokenRowToGradIndex.get(tokenIds[i])!
+        const rowOffset = i * cols
+        const tokenOffset = gradRow * cols
+        for (let j = 0; j < cols; j++) {
+          tokenGradRows[tokenOffset + j] += dOut.data[rowOffset + j]
+        }
+      }
+
+      const positionalRows = Array.from({ length: tokenIds.length }, (_, i) => i)
+      this.tokenOptimizer.stepRows(this.tokenEmbeddings, tokenRows, tokenGradRows, lr)
+      this.positionalOptimizer.stepRows(this.positionalEmbeddings, positionalRows, dOut.data, lr)
 
       return T.clone(dOut)
     })
