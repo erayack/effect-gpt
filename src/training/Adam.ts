@@ -42,20 +42,18 @@ export class Adam {
     const pData = params.data
     const gData = grads.data
 
+    const invMHatScale = 1 / (1 - Math.pow(beta1, this.timestep))
+    const invVHatScale = 1 / (1 - Math.pow(beta2, this.timestep))
+
     for (let i = 0; i < gData.length; i++) {
       const g = gData[i]
-      mData[i] = mData[i] * beta1 + g * oneMinusB1
-      vData[i] = vData[i] * beta2 + g * g * oneMinusB2
-    }
-
-    const mHatScale = 1 - Math.pow(beta1, this.timestep)
-    const vHatScale = 1 - Math.pow(beta2, this.timestep)
-
-    for (let i = 0; i < pData.length; i++) {
-      const mHat = mData[i] / mHatScale
-      const vHat = vData[i] / vHatScale
-      const update = mHat / (Math.sqrt(vHat) + this.epsilon)
-      pData[i] -= lr * update
+      const m = mData[i] * beta1 + g * oneMinusB1
+      const v = vData[i] * beta2 + g * g * oneMinusB2
+      mData[i] = m
+      vData[i] = v
+      const mHat = m * invMHatScale
+      const vHat = v * invVHatScale
+      pData[i] -= lr * (mHat / (Math.sqrt(vHat) + this.epsilon))
     }
   }
 }
