@@ -16,8 +16,8 @@ export class SelfAttention implements ModelLayer {
   wK: Tensor2D
   wV: Tensor2D
 
-  private cache = new Map<number | string, Tensor2D>()
-  private lastCache: Tensor2D | null = null
+  private cache = new Map<number | string, { input: Tensor2D; q: Tensor2D; k: Tensor2D; v: Tensor2D; attnWeights: Tensor2D }>()
+  private lastCache: { input: Tensor2D; q: Tensor2D; k: Tensor2D; v: Tensor2D; attnWeights: Tensor2D } | null = null
   optimizerWQ: Adam
   optimizerWK: Adam
   optimizerWV: Adam
@@ -50,7 +50,11 @@ export class SelfAttention implements ModelLayer {
     })
   }
 
-  private attention(q: Tensor2D, k: Tensor2D, v: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
+  private attention(
+    q: Tensor2D,
+    k: Tensor2D,
+    v: Tensor2D
+  ): Effect.Effect<{ attnWeights: Tensor2D; attended: Tensor2D }, ShapeError> {
     return Effect.gen(this, function* () {
       const dk = Math.sqrt(this.embeddingDim)
       const kT = Ops.transpose(k)
@@ -64,9 +68,9 @@ export class SelfAttention implements ModelLayer {
         }
       }
 
-      const weights = Ops.softmaxRows(scaledScores)
-      const attended = yield* Ops.matMul(weights, v)
-      return attended
+      const attnWeights = Ops.softmaxRows(scaledScores)
+      const attended = yield* Ops.matMul(attnWeights, v)
+      return { attnWeights, attended }
     })
   }
 
@@ -74,11 +78,11 @@ export class SelfAttention implements ModelLayer {
     return Effect.gen(this, function* () {
       const fiberId = yield* Effect.fiberId
       const key = this.fiberKey(fiberId)
-      const cloned = T.clone(input)
-      this.cache.set(key, cloned)
-      this.lastCache = cloned
       const { q, k, v } = yield* this.computeQKV(input)
-      const attended = yield* this.attention(q, k, v)
+      const { attnWeights, attended } = yield* this.attention(q, k, v)
+      const cached = { input, q, k, v, attnWeights }
+      this.cache.set(key, cached)
+      this.lastCache = cached
       const output = yield* Ops.add(attended, input)
       return output
     })
@@ -105,31 +109,15 @@ export class SelfAttention implements ModelLayer {
     return Effect.gen(this, function* () {
       const fiberId = yield* Effect.fiberId
       const key = this.fiberKey(fiberId)
-      const cachedInput = this.cache.get(key) ?? this.lastCache
-      if (!cachedInput) {
+      const cached = this.cache.get(key) ?? this.lastCache
+      if (!cached) {
         return yield* Effect.fail(new Ops.ShapeError("SelfAttention.backward called before forward"))
       }
       this.cache.delete(key)
       this.lastCache = null
 
-      const input = cachedInput
-      const q = yield* Ops.matMul(input, this.wQ)
-      const k = yield* Ops.matMul(input, this.wK)
-      const v = yield* Ops.matMul(input, this.wV)
+      const { input, q, k, v, attnWeights } = cached
       const scale = Math.sqrt(this.wQ.cols)
-
-      const kT = Ops.transpose(k)
-      const scores = yield* Ops.matMul(q, kT)
-      const scaledScores = Ops.mulScalar(scores, 1 / scale)
-
-      const seqLen = scaledScores.rows
-      for (let i = 0; i < seqLen; i++) {
-        for (let j = i + 1; j < seqLen; j++) {
-          T.set(scaledScores, i, j, -Infinity)
-        }
-      }
-
-      const attnWeights = Ops.softmaxRows(scaledScores)
 
       const vT = Ops.transpose(v)
       const gradAttnWeights = yield* Ops.matMul(dOut, vT)
