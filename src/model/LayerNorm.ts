@@ -33,6 +33,18 @@ export class LayerNorm implements ModelLayer {
     return this.gamma.data.length + this.beta.data.length
   }
 
+  forwardInference(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
+    return Effect.gen(this, function* () {
+      const mean = Ops.meanRows(input)
+      const variance = Ops.varRows(input)
+      const rstd = Ops.mapScalar(variance, (v) => 1.0 / Math.sqrt(v + this.epsilon))
+      const centered = yield* Ops.broadcastSubCol(input, mean)
+      const normalized = yield* Ops.broadcastMulCol(centered, rstd)
+      const scaled = yield* Ops.broadcastMulRow(normalized, this.gamma)
+      return yield* Ops.broadcastAddRow(scaled, this.beta)
+    })
+  }
+
   forward(input: Tensor2D, _context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
       const mean = Ops.meanRows(input)

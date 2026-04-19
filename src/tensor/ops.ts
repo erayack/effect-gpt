@@ -311,6 +311,17 @@ export const sliceRows = (t: Tensor2D, start: number, end: number): Effect.Effec
     return T.make(numRows, cols, data)
   }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
 
+export const rowAsMatrix = (t: Tensor2D, row: number): Effect.Effect<Tensor2D, ShapeError> =>
+  Effect.sync(() => {
+    if (row < 0 || row >= t.rows) {
+      throw new ShapeError(`rowAsMatrix: row ${row} out of bounds for tensor with ${t.rows} rows`)
+    }
+
+    const start = row * t.cols
+    const data = t.data.slice(start, start + t.cols)
+    return T.make(1, t.cols, data)
+  }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+
 export const relu = (t: Tensor2D): Tensor2D => {
   const data = new Float32Array(t.data.length)
   for (let i = 0; i < data.length; i++) {

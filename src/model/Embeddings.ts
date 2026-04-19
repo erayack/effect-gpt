@@ -33,6 +33,35 @@ export class Embeddings implements ModelLayer {
     return this.tokenEmbeddings.data.length + this.positionalEmbeddings.data.length
   }
 
+  // Inference-only embedding lookup that does not touch the training cache.
+  // Used by KV-cache prefill/decode in LLM.forwardIncremental.
+  private embedTokenIds(
+    tokenIds: ReadonlyArray<number>,
+    startPosition: number
+  ): Effect.Effect<Tensor2D, ShapeError> {
+    return Effect.gen(this, function* () {
+      const seqLen = tokenIds.length
+      const endPosition = startPosition + seqLen
+      if (endPosition > this.positionalEmbeddings.rows) {
+        return yield* Effect.fail(
+          new Ops.ShapeError(`Sequence length ${endPosition} exceeds maximum ${this.positionalEmbeddings.rows}`)
+        )
+      }
+
+      const tokenEmbeds = yield* Ops.gatherRows(this.tokenEmbeddings, tokenIds)
+      const posEmbeds = yield* Ops.sliceRows(this.positionalEmbeddings, startPosition, endPosition)
+      return yield* Ops.add(tokenEmbeds, posEmbeds)
+    })
+  }
+
+  forwardTokens(tokenIds: ReadonlyArray<number>): Effect.Effect<Tensor2D, ShapeError> {
+    return this.embedTokenIds(tokenIds, 0)
+  }
+
+  forwardToken(tokenId: number, position: number): Effect.Effect<Tensor2D, ShapeError> {
+    return this.embedTokenIds([tokenId], position)
+  }
+
   forward(input: Tensor2D, context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
       const fiberId = yield* Effect.fiberId

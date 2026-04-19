@@ -9,6 +9,14 @@ import { EMBEDDING_DIM } from "../config"
 import { Adam } from "../training/Adam"
 import type { Rng } from "../tensor/random"
 
+export interface SelfAttentionKvCache {
+  readonly keys: Float32Array
+  readonly values: Float32Array
+  readonly capacity: number
+  readonly embeddingDim: number
+  length: number
+}
+
 export class SelfAttention implements ModelLayer {
   readonly _tag = "SelfAttention"
   readonly embeddingDim: number
@@ -109,6 +117,113 @@ export class SelfAttention implements ModelLayer {
       this.lastCache = cached
       const output = yield* Ops.add(attended, input)
       return output
+    })
+  }
+
+  createKvCache(capacity: number): SelfAttentionKvCache {
+    return {
+      keys: new Float32Array(capacity * this.embeddingDim),
+      values: new Float32Array(capacity * this.embeddingDim),
+      capacity,
+      embeddingDim: this.embeddingDim,
+      length: 0
+    }
+  }
+
+  private validateKvCache(cache: SelfAttentionKvCache): Effect.Effect<void, ShapeError> {
+    return Effect.sync(() => {
+      if (cache.embeddingDim !== this.embeddingDim) {
+        throw new Ops.ShapeError(
+          `KV cache embedding dimension ${cache.embeddingDim} does not match attention dimension ${this.embeddingDim}`
+        )
+      }
+      if (cache.length < 0 || cache.length > cache.capacity) {
+        throw new Ops.ShapeError(`KV cache length ${cache.length} is out of bounds for capacity ${cache.capacity}`)
+      }
+    }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+  }
+
+  private ensureEmptyKvCache(cache: SelfAttentionKvCache): Effect.Effect<void, ShapeError> {
+    return Effect.sync(() => {
+      if (cache.length !== 0) {
+        throw new Ops.ShapeError(
+          `KV cache must be empty before prefill, received length ${cache.length}. Create a fresh cache for each prompt.`
+        )
+      }
+    }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+  }
+
+  private storeKvRows(k: Tensor2D, v: Tensor2D, cache: SelfAttentionKvCache): Effect.Effect<void, ShapeError> {
+    return Effect.sync(() => {
+      const nextLength = cache.length + k.rows
+      if (nextLength > cache.capacity) {
+        throw new Ops.ShapeError(`KV cache capacity ${cache.capacity} exceeded by sequence length ${nextLength}`)
+      }
+
+      const offset = cache.length * this.embeddingDim
+      cache.keys.set(k.data, offset)
+      cache.values.set(v.data, offset)
+      cache.length = nextLength
+    }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+  }
+
+  prefill(input: Tensor2D, cache: SelfAttentionKvCache): Effect.Effect<Tensor2D, ShapeError> {
+    return Effect.gen(this, function* () {
+      yield* this.validateKvCache(cache)
+      yield* this.ensureEmptyKvCache(cache)
+      const { q, k, v } = yield* this.computeQKV(input)
+      yield* this.storeKvRows(k, v, cache)
+      const { attended } = yield* this.attention(q, k, v)
+      return yield* Ops.add(attended, input)
+    })
+  }
+
+  decodeStep(input: Tensor2D, cache: SelfAttentionKvCache): Effect.Effect<Tensor2D, ShapeError> {
+    return Effect.gen(this, function* () {
+      yield* this.validateKvCache(cache)
+      if (input.rows !== 1) {
+        return yield* Effect.fail(new Ops.ShapeError(`decodeStep expects a single row, received ${input.rows}`))
+      }
+
+      const { q, k, v } = yield* this.computeQKV(input)
+      yield* this.storeKvRows(k, v, cache)
+
+      const seqLen = cache.length
+      const dim = this.embeddingDim
+      const scale = Math.sqrt(dim)
+      const scores = new Float32Array(seqLen)
+      let maxScore = -Infinity
+      for (let row = 0; row < seqLen; row++) {
+        const cacheOffset = row * dim
+        let score = 0
+        for (let col = 0; col < dim; col++) {
+          score += q.data[col] * cache.keys[cacheOffset + col]
+        }
+        score /= scale
+        scores[row] = score
+        if (score > maxScore) {
+          maxScore = score
+        }
+      }
+
+      let sumExp = 0
+      for (let row = 0; row < seqLen; row++) {
+        const weight = Math.exp(scores[row]! - maxScore)
+        scores[row] = weight
+        sumExp += weight
+      }
+
+      const attendedData = new Float32Array(dim)
+      for (let row = 0; row < seqLen; row++) {
+        const weight = scores[row]! / sumExp
+        const cacheOffset = row * dim
+        for (let col = 0; col < dim; col++) {
+          attendedData[col] += weight * cache.values[cacheOffset + col]
+        }
+      }
+
+      const attended = T.make(1, dim, attendedData)
+      return yield* Ops.add(attended, input)
     })
   }
 

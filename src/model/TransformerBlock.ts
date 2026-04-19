@@ -2,11 +2,15 @@ import * as Effect from "effect/Effect"
 import type { Tensor2D } from "../tensor/Tensor2D"
 import type { ShapeError } from "../tensor/ops"
 import type { LayerForwardContext, ModelLayer } from "./ModelLayer"
-import { SelfAttention } from "./SelfAttention"
+import { SelfAttention, type SelfAttentionKvCache } from "./SelfAttention"
 import { FeedForward } from "./FeedForward"
 import { LayerNorm } from "./LayerNorm"
 import { EMBEDDING_DIM, HIDDEN_DIM } from "../config"
 import type { Rng } from "../tensor/random"
+
+export interface TransformerBlockDecodeState {
+  readonly attention: SelfAttentionKvCache
+}
 
 export class TransformerBlock implements ModelLayer {
   readonly _tag = "TransformerBlock"
@@ -38,6 +42,30 @@ export class TransformerBlock implements ModelLayer {
       const ffnOut: Tensor2D = yield* this.feedForward.forward(norm1Out, context)
       const norm2Out: Tensor2D = yield* this.norm2.forward(ffnOut, context)
       return norm2Out
+    })
+  }
+
+  createDecodeState(capacity: number): TransformerBlockDecodeState {
+    return {
+      attention: this.attention.createKvCache(capacity)
+    }
+  }
+
+  prefill(input: Tensor2D, state: TransformerBlockDecodeState): Effect.Effect<Tensor2D, ShapeError> {
+    return Effect.gen(this, function* () {
+      const attentionOut: Tensor2D = yield* this.attention.prefill(input, state.attention)
+      const norm1Out: Tensor2D = yield* this.norm1.forwardInference(attentionOut)
+      const ffnOut: Tensor2D = yield* this.feedForward.forwardInference(norm1Out)
+      return yield* this.norm2.forwardInference(ffnOut)
+    })
+  }
+
+  decodeStep(input: Tensor2D, state: TransformerBlockDecodeState): Effect.Effect<Tensor2D, ShapeError> {
+    return Effect.gen(this, function* () {
+      const attentionOut: Tensor2D = yield* this.attention.decodeStep(input, state.attention)
+      const norm1Out: Tensor2D = yield* this.norm1.forwardInference(attentionOut)
+      const ffnOut: Tensor2D = yield* this.feedForward.forwardInference(norm1Out)
+      return yield* this.norm2.forwardInference(ffnOut)
     })
   }
 

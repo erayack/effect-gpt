@@ -45,6 +45,17 @@ export class FeedForward implements ModelLayer {
     return this.w1.data.length + this.b1.data.length + this.w2.data.length + this.b2.data.length
   }
 
+  forwardInference(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
+    return Effect.gen(this, function* () {
+      const h1 = yield* Ops.matMul(input, this.w1)
+      const h1Bias = yield* Ops.addRowBias(h1, this.b1)
+      const h1Relu = Ops.relu(h1Bias)
+      const h2 = yield* Ops.matMul(h1Relu, this.w2)
+      const h2Bias = yield* Ops.addRowBias(h2, this.b2)
+      return yield* Ops.add(h2Bias, input)
+    })
+  }
+
   forward(input: Tensor2D, _context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
       const fiberId = yield* Effect.fiberId

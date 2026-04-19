@@ -1,8 +1,9 @@
 import { describe, test, expect } from "bun:test"
-import { runEffect } from "./support/runEffect"
-import { expectShape, expectNotClose, expectFinite } from "./support/tensorMatchers"
+import { runEffect, runEffectFail } from "./support/runEffect"
+import { expectShape, expectNotClose, expectFinite, expectClose } from "./support/tensorMatchers"
 import { makeTransformerBlock } from "./support/factories"
 import * as T from "../../src/tensor/Tensor2D"
+import * as Ops from "../../src/tensor/ops"
 import { EMBEDDING_DIM, HIDDEN_DIM } from "../../src/config"
 
 describe("TransformerBlock", () => {
@@ -68,5 +69,76 @@ describe("TransformerBlock", () => {
 
     const expectedTotal = attentionParams + feedForwardParams + normParams
     expect(block.parametersCount).toBe(expectedTotal)
+  })
+
+  test("prefill matches forward", () => {
+    const block = makeTransformerBlock()
+    const input = T.ones(3, EMBEDDING_DIM)
+    const expected = runEffect(block.forward(input))
+
+    const incremental = makeTransformerBlock()
+    incremental.attention.wQ = T.clone(block.attention.wQ)
+    incremental.attention.wK = T.clone(block.attention.wK)
+    incremental.attention.wV = T.clone(block.attention.wV)
+    incremental.feedForward.w1 = T.clone(block.feedForward.w1)
+    incremental.feedForward.b1 = T.clone(block.feedForward.b1)
+    incremental.feedForward.w2 = T.clone(block.feedForward.w2)
+    incremental.feedForward.b2 = T.clone(block.feedForward.b2)
+    incremental.norm1.gamma = T.clone(block.norm1.gamma)
+    incremental.norm1.beta = T.clone(block.norm1.beta)
+    incremental.norm2.gamma = T.clone(block.norm2.gamma)
+    incremental.norm2.beta = T.clone(block.norm2.beta)
+
+    const state = incremental.createDecodeState(8)
+    const actual = runEffect(incremental.prefill(input, state))
+
+    expectClose(actual, expected)
+    expect(state.attention.length).toBe(input.rows)
+  })
+
+  test("decodeStep matches last row of full forward on extended sequence", () => {
+    const block = makeTransformerBlock()
+    const prefix = T.ones(2, EMBEDDING_DIM)
+    const next = T.zeros(1, EMBEDDING_DIM)
+    for (let i = 0; i < next.data.length; i++) {
+      next.data[i] = (i % 11) * 0.03
+    }
+
+    const extended = T.zeros(3, EMBEDDING_DIM)
+    extended.data.set(prefix.data)
+    extended.data.set(next.data, prefix.data.length)
+
+    const expectedFull = runEffect(block.forward(extended))
+    const expectedLast = runEffect(Ops.rowAsMatrix(expectedFull, expectedFull.rows - 1))
+
+    const incremental = makeTransformerBlock()
+    incremental.attention.wQ = T.clone(block.attention.wQ)
+    incremental.attention.wK = T.clone(block.attention.wK)
+    incremental.attention.wV = T.clone(block.attention.wV)
+    incremental.feedForward.w1 = T.clone(block.feedForward.w1)
+    incremental.feedForward.b1 = T.clone(block.feedForward.b1)
+    incremental.feedForward.w2 = T.clone(block.feedForward.w2)
+    incremental.feedForward.b2 = T.clone(block.feedForward.b2)
+    incremental.norm1.gamma = T.clone(block.norm1.gamma)
+    incremental.norm1.beta = T.clone(block.norm1.beta)
+    incremental.norm2.gamma = T.clone(block.norm2.gamma)
+    incremental.norm2.beta = T.clone(block.norm2.beta)
+
+    const state = incremental.createDecodeState(8)
+    runEffect(incremental.prefill(prefix, state))
+    const actual = runEffect(incremental.decodeStep(next, state))
+
+    expectClose(actual, expectedLast)
+    expect(state.attention.length).toBe(3)
+  })
+
+  test("prefill rejects reused decode state", () => {
+    const block = makeTransformerBlock()
+    const state = block.createDecodeState(8)
+    runEffect(block.prefill(T.ones(2, EMBEDDING_DIM), state))
+
+    const error = runEffectFail(block.prefill(T.ones(1, EMBEDDING_DIM), state))
+
+    expect(error.message).toContain("KV cache must be empty before prefill")
   })
 })

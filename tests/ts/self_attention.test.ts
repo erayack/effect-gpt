@@ -1,8 +1,9 @@
 import { describe, test, expect } from "bun:test"
-import { runEffect } from "./support/runEffect"
-import { expectShape, expectNotClose, expectFinite } from "./support/tensorMatchers"
+import { runEffect, runEffectFail } from "./support/runEffect"
+import { expectShape, expectNotClose, expectFinite, expectClose } from "./support/tensorMatchers"
 import { makeSelfAttention } from "./support/factories"
 import * as T from "../../src/tensor/Tensor2D"
+import * as Ops from "../../src/tensor/ops"
 import { EMBEDDING_DIM } from "../../src/config"
 import type { SequenceLayout } from "../../src/model/ModelLayer"
 
@@ -92,5 +93,61 @@ describe("SelfAttention", () => {
     const attention = makeSelfAttention()
     const expectedCount = 3 * EMBEDDING_DIM * EMBEDDING_DIM
     expect(attention.parametersCount).toBe(expectedCount)
+  })
+
+  test("prefill matches forward and seeds KV cache", () => {
+    const attention = makeSelfAttention()
+    const input = T.ones(3, EMBEDDING_DIM)
+
+    const expected = runEffect(attention.forward(input))
+
+    const cacheAttention = makeSelfAttention()
+    cacheAttention.wQ = T.clone(attention.wQ)
+    cacheAttention.wK = T.clone(attention.wK)
+    cacheAttention.wV = T.clone(attention.wV)
+    const cache = cacheAttention.createKvCache(8)
+
+    const actual = runEffect(cacheAttention.prefill(input, cache))
+
+    expectClose(actual, expected)
+    expect(cache.length).toBe(input.rows)
+  })
+
+  test("decodeStep matches last row of full forward on extended sequence", () => {
+    const attention = makeSelfAttention()
+    const prefix = T.ones(3, EMBEDDING_DIM)
+    const next = T.zeros(1, EMBEDDING_DIM)
+    for (let i = 0; i < next.data.length; i++) {
+      next.data[i] = (i % 7) * 0.05
+    }
+
+    const extended = T.zeros(4, EMBEDDING_DIM)
+    extended.data.set(prefix.data)
+    extended.data.set(next.data, prefix.data.length)
+
+    const expectedFull = runEffect(attention.forward(extended))
+    const expectedLast = runEffect(Ops.rowAsMatrix(expectedFull, expectedFull.rows - 1))
+
+    const cacheAttention = makeSelfAttention()
+    cacheAttention.wQ = T.clone(attention.wQ)
+    cacheAttention.wK = T.clone(attention.wK)
+    cacheAttention.wV = T.clone(attention.wV)
+    const cache = cacheAttention.createKvCache(8)
+
+    runEffect(cacheAttention.prefill(prefix, cache))
+    const actual = runEffect(cacheAttention.decodeStep(next, cache))
+
+    expectClose(actual, expectedLast)
+    expect(cache.length).toBe(4)
+  })
+
+  test("prefill rejects non-empty KV cache", () => {
+    const attention = makeSelfAttention()
+    const cache = attention.createKvCache(8)
+    runEffect(attention.prefill(T.ones(2, EMBEDDING_DIM), cache))
+
+    const error = runEffectFail(attention.prefill(T.ones(1, EMBEDDING_DIM), cache))
+
+    expect(error.message).toContain("KV cache must be empty before prefill")
   })
 })

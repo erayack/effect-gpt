@@ -5,6 +5,49 @@ import { makeLLM, makeLLMWithNetwork, makeEmbeddings, makeTransformerBlock } fro
 import { StubOutputProjection } from "./support/stubs"
 import { Vocab } from "../../src/vocab/Vocab"
 import { CANONICAL_SEED } from "./support/seed"
+import * as T from "../../src/tensor/Tensor2D"
+import * as Ops from "../../src/tensor/ops"
+import { MAX_SEQ_LEN } from "../../src/config"
+import { tokenize } from "../../src/tokenize/tokenize"
+import type { LLM } from "../../src/model/LLM"
+
+const forwardWithFullRecompute = (llm: LLM, text: string): ReadonlyArray<number> => {
+  const tokenized: Array<number> = [...tokenize(text, llm.vocab)]
+  const outputTokens: Array<number> = []
+
+  if (tokenized.length === 0 || tokenized.length >= MAX_SEQ_LEN) {
+    return outputTokens
+  }
+
+  const endTokenId = Option.getOrThrow(llm.vocab.encode("</s>"))
+
+  for (let step = 0; step < MAX_SEQ_LEN - tokenized.length; step++) {
+    const tokenInput = T.fromArray(1, tokenized.length, tokenized)
+    let input = tokenInput
+
+    for (const layer of llm.network) {
+      input = runEffect(layer.forward(input))
+    }
+
+    if (input.rows === 0) {
+      break
+    }
+
+    const lastLogit = runEffect(Ops.rowAsMatrix(input, input.rows - 1))
+    const probs = Ops.softmaxRows(lastLogit)
+    const tokens = Ops.argmaxRows(probs)
+    const nextToken = tokens[tokens.length - 1]!
+
+    outputTokens.push(nextToken)
+    tokenized.push(nextToken)
+
+    if (nextToken === endTokenId) {
+      break
+    }
+  }
+
+  return outputTokens
+}
 
 describe("LLM Predict", () => {
   const vocabWords = Vocab.defaultWords()
@@ -94,5 +137,18 @@ describe("LLM Predict", () => {
     const result2 = runEffect(llm2.predict("hello"))
 
     expect(result1).toBe(result2)
+  })
+
+  test("incremental decoding matches legacy full recompute for standard network", () => {
+    const llm = makeLLM({
+      vocabWords,
+      seed: CANONICAL_SEED,
+      numTransformerBlocks: 2
+    })
+
+    const actual = runEffect(llm.forward("hello world"))
+    const expected = forwardWithFullRecompute(llm, "hello world")
+
+    expect(actual).toEqual(expected)
   })
 })

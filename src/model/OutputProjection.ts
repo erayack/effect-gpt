@@ -33,6 +33,13 @@ export class OutputProjection implements ModelLayer {
     return this.wOut.data.length + this.bOut.data.length
   }
 
+  forwardInference(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
+    return Effect.gen(this, function* () {
+      const projected = yield* Ops.matMul(input, this.wOut)
+      return yield* Ops.addRowBias(projected, this.bOut)
+    })
+  }
+
   forward(input: Tensor2D, _context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
       const fiberId = yield* Effect.fiberId
