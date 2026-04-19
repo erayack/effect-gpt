@@ -4,7 +4,7 @@ import * as Ops from "../tensor/ops"
 
 export const softmaxRows = (logits: Tensor2D): Tensor2D => Ops.softmaxRows(logits)
 
-export const crossEntropyLoss = (probs: Tensor2D, targetIds: ReadonlyArray<number>): number => {
+export const crossEntropyLoss = (probs: Tensor2D, targetIds: ArrayLike<number>): number => {
   if (probs.rows !== targetIds.length) {
     throw new Ops.ShapeError(`crossEntropyLoss: probs.rows (${probs.rows}) !== targetIds.length (${targetIds.length})`)
   }
@@ -18,7 +18,7 @@ export const crossEntropyLoss = (probs: Tensor2D, targetIds: ReadonlyArray<numbe
   return loss / targetIds.length
 }
 
-export const dLogits = (probs: Tensor2D, targetIds: ReadonlyArray<number>): Tensor2D => {
+export const dLogits = (probs: Tensor2D, targetIds: ArrayLike<number>): Tensor2D => {
   if (probs.rows !== targetIds.length) {
     throw new Ops.ShapeError(`dLogits: probs.rows (${probs.rows}) !== targetIds.length (${targetIds.length})`)
   }
@@ -36,7 +36,7 @@ export const dLogits = (probs: Tensor2D, targetIds: ReadonlyArray<number>): Tens
 
 export const crossEntropyLossAndDLogits = (
   probs: Tensor2D,
-  targetIds: ReadonlyArray<number>
+  targetIds: ArrayLike<number>
 ): { loss: number; grads: Tensor2D } => {
   if (probs.rows !== targetIds.length) {
     throw new Ops.ShapeError(

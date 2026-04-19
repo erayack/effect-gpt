@@ -4,6 +4,7 @@ import { expectShape, expectNotClose, expectFinite } from "./support/tensorMatch
 import { makeEmbeddings } from "./support/factories"
 import * as T from "../../src/tensor/Tensor2D"
 import { EMBEDDING_DIM, MAX_SEQ_LEN } from "../../src/config"
+import type { SequenceLayout } from "../../src/model/ModelLayer"
 
 describe("Embeddings", () => {
   test("embed single token → [1, EMBEDDING_DIM]", () => {
@@ -70,6 +71,59 @@ describe("Embeddings", () => {
 
     expectNotClose(embeddings.tokenEmbeddings, tokenBefore)
     expectNotClose(embeddings.positionalEmbeddings, positionalBefore)
+  })
+
+  test("batch layout resets positional embeddings per sequence", () => {
+    const embeddings = makeEmbeddings(10)
+    const flattenedInput = T.fromArray(1, 4, [0, 1, 2, 3])
+    const layout: SequenceLayout = {
+      totalTokens: 4,
+      sequenceLengths: [2, 2],
+      sequenceIds: new Int32Array([0, 0, 1, 1]),
+      positionIds: new Int32Array([0, 1, 0, 1])
+    }
+
+    const batched = runEffect(embeddings.forward(flattenedInput, { sequenceLayout: layout }))
+    const first = runEffect(embeddings.forward(T.fromArray(1, 2, [0, 1])))
+    const second = runEffect(embeddings.forward(T.fromArray(1, 2, [2, 3])))
+
+    expectShape(batched, [4, EMBEDDING_DIM])
+    for (let row = 0; row < 2; row++) {
+      for (let col = 0; col < EMBEDDING_DIM; col++) {
+        expect(T.get(batched, row, col)).toBe(T.get(first, row, col))
+        expect(T.get(batched, row + 2, col)).toBe(T.get(second, row, col))
+      }
+    }
+  })
+
+  test("batched backward accumulates positional gradients by positionIds", () => {
+    const embeddings = makeEmbeddings(10)
+    const input = T.fromArray(1, 4, [0, 1, 2, 3])
+    const layout: SequenceLayout = {
+      totalTokens: 4,
+      sequenceLengths: [2, 2],
+      sequenceIds: new Int32Array([0, 0, 1, 1]),
+      positionIds: new Int32Array([0, 1, 0, 1])
+    }
+    const positionalBefore = T.clone(embeddings.positionalEmbeddings)
+
+    runEffect(embeddings.forward(input, { sequenceLayout: layout }))
+    runEffect(embeddings.backward(T.ones(4, EMBEDDING_DIM), 0.01))
+
+    const rowDiff = (row: number) => {
+      let diff = 0
+      for (let col = 0; col < EMBEDDING_DIM; col++) {
+        diff += Math.abs(
+          T.get(positionalBefore, row, col) - T.get(embeddings.positionalEmbeddings, row, col)
+        )
+      }
+      return diff
+    }
+
+    expect(rowDiff(0)).toBeGreaterThan(0)
+    expect(rowDiff(1)).toBeGreaterThan(0)
+    expect(rowDiff(2)).toBe(0)
+    expect(rowDiff(3)).toBe(0)
   })
 
   test("parametersCount", () => {

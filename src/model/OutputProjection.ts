@@ -4,7 +4,7 @@ import type { Tensor2D } from "../tensor/Tensor2D"
 import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
 import type { ShapeError } from "../tensor/ops"
-import type { ModelLayer } from "./ModelLayer"
+import type { LayerForwardContext, ModelLayer } from "./ModelLayer"
 import { EMBEDDING_DIM } from "../config"
 import { Adam } from "../training/Adam"
 import type { Rng } from "../tensor/random"
@@ -33,13 +33,12 @@ export class OutputProjection implements ModelLayer {
     return this.wOut.data.length + this.bOut.data.length
   }
 
-  forward(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
+  forward(input: Tensor2D, _context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
       const fiberId = yield* Effect.fiberId
       const key = this.fiberKey(fiberId)
-      const cloned = T.clone(input)
-      this.cache.set(key, cloned)
-      this.lastCache = cloned
+      this.cache.set(key, input)
+      this.lastCache = input
       const projected = yield* Ops.matMul(input, this.wOut)
       const output = yield* Ops.addRowBias(projected, this.bOut)
       return output

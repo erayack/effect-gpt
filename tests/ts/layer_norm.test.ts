@@ -89,6 +89,17 @@ describe("LayerNorm", () => {
     expectNotClose(ln.beta, betaBefore)
   })
 
+  test("backward remains finite for zero-variance rows", () => {
+    const ln = makeLayerNorm()
+    const input = T.ones(3, EMBEDDING_DIM)
+
+    runEffect(ln.forward(input))
+    const grad = runEffect(ln.backward(T.ones(3, EMBEDDING_DIM), 0.01))
+
+    expectShape(grad, [3, EMBEDDING_DIM])
+    expectFinite(grad)
+  })
+
   test("parametersCount", () => {
     const ln = makeLayerNorm()
     expect(ln.parametersCount).toBe(2 * EMBEDDING_DIM)

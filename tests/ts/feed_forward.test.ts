@@ -65,6 +65,22 @@ describe("FeedForward", () => {
     expectNotClose(ff.b2, b2Before)
   })
 
+  test("backward remains finite when ReLU outputs are zero", () => {
+    const ff = makeFeedForward()
+    ff.w1.data.fill(0)
+    ff.b1.data.fill(-1)
+    ff.w2.data.fill(0)
+    ff.b2.data.fill(0)
+
+    const input = T.ones(3, EMBEDDING_DIM)
+    const output = runEffect(ff.forward(input))
+    expectFinite(output)
+
+    const gradInput = runEffect(ff.backward(T.ones(3, EMBEDDING_DIM), 0.01))
+    expectShape(gradInput, [3, EMBEDDING_DIM])
+    expectFinite(gradInput)
+  })
+
   test("parametersCount", () => {
     const ff = makeFeedForward()
     const expected =

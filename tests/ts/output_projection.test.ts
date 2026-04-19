@@ -70,6 +70,19 @@ describe("OutputProjection", () => {
     expectNotClose(proj.bOut, bOutBefore)
   })
 
+  test("forward/backward does not mutate cached input tensor", () => {
+    const proj = makeOutputProjection(vocabSize)
+    const input = T.ones(3, EMBEDDING_DIM)
+    const inputBefore = T.clone(input)
+
+    runEffect(proj.forward(input))
+    runEffect(proj.backward(T.ones(3, vocabSize), 0.01))
+
+    for (let i = 0; i < input.data.length; i++) {
+      expect(input.data[i]).toBe(inputBefore.data[i])
+    }
+  })
+
   test("parametersCount", () => {
     const proj = makeOutputProjection(vocabSize)
     const expected = EMBEDDING_DIM * vocabSize + vocabSize

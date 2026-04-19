@@ -23,6 +23,11 @@ const TestServicesLayer = Layer.mergeAll(
   makePreprocessSettingsLayer({ concurrency: "unbounded", batchSize: 1 })
 )
 
+const BatchedTestServicesLayer = Layer.mergeAll(
+  BaseTestServicesLayer,
+  makePreprocessSettingsLayer({ concurrency: "unbounded", batchSize: 2 })
+)
+
 describe("Train Loop", () => {
   const tinyVocab = ["hello", "world", "is", "this", "test", "</s>"]
   const tinyCorpus = ["hello world </s>", "this is </s>", "test world </s>"]
@@ -225,5 +230,104 @@ describe("Train Loop", () => {
     }
 
     expect(diff2).toBeGreaterThan(diff1)
+  })
+
+  test("batchSize > 1 performs one optimizer step per minibatch", () => {
+    const llm = createTinyLLM()
+    const embeddings = llm.network[0] as Embeddings
+
+    Effect.runSync(
+      train(tinyCorpus).pipe(
+        Effect.provide(makeLLMLayer(llm)),
+        Effect.provide(makeTrainingConfigLayer({ epochs: 1, learningRate: 0.01 })),
+        Effect.provide(BatchedTestServicesLayer)
+      )
+    )
+
+    expect(embeddings.tokenOptimizer.timestep).toBe(2)
+    expect(embeddings.positionalOptimizer.timestep).toBe(2)
+  })
+
+  test("batchSize > 1 still mutates weights", () => {
+    const llm = createTinyLLM()
+    const embeddings = llm.network[0] as Embeddings
+    const before = T.clone(embeddings.tokenEmbeddings)
+
+    Effect.runSync(
+      train(tinyCorpus).pipe(
+        Effect.provide(makeLLMLayer(llm)),
+        Effect.provide(makeTrainingConfigLayer({ epochs: 1, learningRate: 0.01 })),
+        Effect.provide(BatchedTestServicesLayer)
+      )
+    )
+
+    expectNotClose(embeddings.tokenEmbeddings, before)
+  })
+
+  test("trainConcurrency=1 is accepted for batched training", () => {
+    const llm = createTinyLLM()
+
+    expect(() =>
+      Effect.runSync(
+        train(tinyCorpus).pipe(
+          Effect.provide(makeLLMLayer(llm)),
+          Effect.provide(makeTrainingConfigLayer({ epochs: 1, learningRate: 0.01, trainConcurrency: 1 })),
+          Effect.provide(BatchedTestServicesLayer)
+        )
+      )
+    ).not.toThrow()
+  })
+
+  test("trainConcurrency > 1 is rejected for batched training", () => {
+    const llm = createTinyLLM()
+
+    expect(() =>
+      Effect.runSync(
+        train(tinyCorpus).pipe(
+          Effect.provide(makeLLMLayer(llm)),
+          Effect.provide(makeTrainingConfigLayer({ epochs: 1, learningRate: 0.01, trainConcurrency: 2 })),
+          Effect.provide(BatchedTestServicesLayer)
+        )
+      )
+    ).toThrow("trainConcurrency > 1 is not supported for batched training")
+  })
+
+  test("loss decreases over epochs with batchSize > 1", async () => {
+    const llm = createTinyLLM()
+    const losses: Array<number> = []
+
+    const makeCaptureLossLogger = () => {
+      const service = {
+        log: (_level: any, _message: string, data?: Record<string, unknown>) => {
+          if (data?.loss !== undefined) {
+            losses.push(data.loss as number)
+          }
+          return Effect.void
+        },
+        debug: () => Effect.void,
+        info: (_message: string, data?: Record<string, unknown>) => {
+          if (data?.loss !== undefined) {
+            losses.push(data.loss as number)
+          }
+          return Effect.void
+        },
+        warn: () => Effect.void,
+        error: () => Effect.void
+      }
+      return Layer.succeed(Logger, service)
+    }
+
+    const program = train(tinyCorpus).pipe(
+      Effect.provide(makeLLMLayer(llm)),
+      Effect.provide(makeTrainingConfigLayer({ epochs: 3, learningRate: 0.01 })),
+      Effect.provide(makeCaptureLossLogger()),
+      Effect.provide(NoOpMetricsLive),
+      Effect.provide(makePreprocessSettingsLayer({ concurrency: "unbounded", batchSize: 2 }))
+    )
+
+    await Effect.runPromise(program)
+
+    expect(losses.length).toBe(3)
+    expect(losses[2]).toBeLessThan(losses[0]!)
   })
 })

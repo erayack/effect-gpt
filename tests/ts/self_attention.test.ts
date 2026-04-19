@@ -4,6 +4,7 @@ import { expectShape, expectNotClose, expectFinite } from "./support/tensorMatch
 import { makeSelfAttention } from "./support/factories"
 import * as T from "../../src/tensor/Tensor2D"
 import { EMBEDDING_DIM } from "../../src/config"
+import type { SequenceLayout } from "../../src/model/ModelLayer"
 
 describe("SelfAttention", () => {
   test("forward shape matches input", () => {
@@ -53,6 +54,38 @@ describe("SelfAttention", () => {
     expectNotClose(attention.wQ, wQBefore)
     expectNotClose(attention.wK, wKBefore)
     expectNotClose(attention.wV, wVBefore)
+  })
+
+  test("batch layout prevents attention across flattened sequences", () => {
+    const attention = makeSelfAttention()
+    const sequenceA = T.fromArray(2, EMBEDDING_DIM, new Float32Array(2 * EMBEDDING_DIM).fill(1))
+    const sequenceBData = new Float32Array(2 * EMBEDDING_DIM)
+    sequenceBData.fill(5)
+    const sequenceB = T.fromArray(2, EMBEDDING_DIM, sequenceBData)
+
+    const flattenedData = new Float32Array(4 * EMBEDDING_DIM)
+    flattenedData.set(sequenceA.data, 0)
+    flattenedData.set(sequenceB.data, sequenceA.data.length)
+    const flattened = T.make(4, EMBEDDING_DIM, flattenedData)
+
+    const layout: SequenceLayout = {
+      totalTokens: 4,
+      sequenceLengths: [2, 2],
+      sequenceIds: new Int32Array([0, 0, 1, 1]),
+      positionIds: new Int32Array([0, 1, 0, 1])
+    }
+
+    const batched = runEffect(attention.forward(flattened, { sequenceLayout: layout }))
+    const outputA = runEffect(attention.forward(sequenceA))
+    const outputB = runEffect(attention.forward(sequenceB))
+
+    expectShape(batched, [4, EMBEDDING_DIM])
+    for (let col = 0; col < EMBEDDING_DIM; col++) {
+      expect(T.get(batched, 0, col)).toBeCloseTo(T.get(outputA, 0, col), 5)
+      expect(T.get(batched, 1, col)).toBeCloseTo(T.get(outputA, 1, col), 5)
+      expect(T.get(batched, 2, col)).toBeCloseTo(T.get(outputB, 0, col), 5)
+      expect(T.get(batched, 3, col)).toBeCloseTo(T.get(outputB, 1, col), 5)
+    }
   })
 
   test("parametersCount", () => {

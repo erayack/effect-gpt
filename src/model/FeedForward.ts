@@ -4,7 +4,7 @@ import type { Tensor2D } from "../tensor/Tensor2D"
 import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
 import type { ShapeError } from "../tensor/ops"
-import type { ModelLayer } from "./ModelLayer"
+import type { LayerForwardContext, ModelLayer } from "./ModelLayer"
 import { EMBEDDING_DIM, HIDDEN_DIM } from "../config"
 import { Adam } from "../training/Adam"
 import type { Rng } from "../tensor/random"
@@ -16,13 +16,8 @@ export class FeedForward implements ModelLayer {
   w2: Tensor2D
   b2: Tensor2D
 
-  private cache = new Map<
-    number | string,
-    { input: Tensor2D; hiddenPreActivation: Tensor2D; hiddenPostActivation: Tensor2D }
-  >()
-  private lastCache:
-    | { input: Tensor2D; hiddenPreActivation: Tensor2D; hiddenPostActivation: Tensor2D }
-    | null = null
+  private cache = new Map<number | string, { input: Tensor2D; hiddenPostActivation: Tensor2D }>()
+  private lastCache: { input: Tensor2D; hiddenPostActivation: Tensor2D } | null = null
   optimizerW1: Adam
   optimizerB1: Adam
   optimizerW2: Adam
@@ -50,21 +45,17 @@ export class FeedForward implements ModelLayer {
     return this.w1.data.length + this.b1.data.length + this.w2.data.length + this.b2.data.length
   }
 
-  forward(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
+  forward(input: Tensor2D, _context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
       const fiberId = yield* Effect.fiberId
       const key = this.fiberKey(fiberId)
 
       const h1 = yield* Ops.matMul(input, this.w1)
       const h1Bias = yield* Ops.addRowBias(h1, this.b1)
-      const h1BiasClone = T.clone(h1Bias)
-
       const h1Relu = Ops.relu(h1Bias)
-      const h1ReluClone = T.clone(h1Relu)
       const cached = {
-        input: T.clone(input),
-        hiddenPreActivation: h1BiasClone,
-        hiddenPostActivation: h1ReluClone
+        input,
+        hiddenPostActivation: h1Relu
       }
       this.cache.set(key, cached)
       this.lastCache = cached
@@ -87,7 +78,7 @@ export class FeedForward implements ModelLayer {
       this.cache.delete(key)
       this.lastCache = null
 
-      const { input, hiddenPreActivation, hiddenPostActivation } = cached
+      const { input, hiddenPostActivation } = cached
 
       const hiddenPostT = Ops.transpose(hiddenPostActivation)
       const gradW2 = yield* Ops.matMul(hiddenPostT, dOut)
@@ -96,9 +87,9 @@ export class FeedForward implements ModelLayer {
       const w2T = Ops.transpose(this.w2)
       const gradHiddenPost = yield* Ops.matMul(dOut, w2T)
 
-      const reluGrad = T.zeros(hiddenPreActivation.rows, hiddenPreActivation.cols)
-      for (let i = 0; i < hiddenPreActivation.data.length; i++) {
-        reluGrad.data[i] = hiddenPreActivation.data[i] > 0 ? 1 : 0
+      const reluGrad = T.zeros(hiddenPostActivation.rows, hiddenPostActivation.cols)
+      for (let i = 0; i < hiddenPostActivation.data.length; i++) {
+        reluGrad.data[i] = hiddenPostActivation.data[i] > 0 ? 1 : 0
       }
       const gradHiddenPre = yield* Ops.mul(gradHiddenPost, reluGrad)
 

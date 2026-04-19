@@ -4,7 +4,7 @@ import type { Tensor2D } from "../tensor/Tensor2D"
 import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
 import type { ShapeError } from "../tensor/ops"
-import type { ModelLayer } from "./ModelLayer"
+import type { LayerForwardContext, ModelLayer, SequenceLayout } from "./ModelLayer"
 import { EMBEDDING_DIM } from "../config"
 import { Adam } from "../training/Adam"
 import type { Rng } from "../tensor/random"
@@ -53,7 +53,8 @@ export class SelfAttention implements ModelLayer {
   private attention(
     q: Tensor2D,
     k: Tensor2D,
-    v: Tensor2D
+    v: Tensor2D,
+    layout?: SequenceLayout
   ): Effect.Effect<{ attnWeights: Tensor2D; attended: Tensor2D }, ShapeError> {
     return Effect.gen(this, function* () {
       const dk = Math.sqrt(this.embeddingDim)
@@ -62,9 +63,32 @@ export class SelfAttention implements ModelLayer {
       const scaledScores = Ops.mulScalar(scores, 1 / dk)
 
       const seqLen = scaledScores.rows
-      for (let i = 0; i < seqLen; i++) {
-        for (let j = i + 1; j < seqLen; j++) {
-          T.set(scaledScores, i, j, -Infinity)
+      if (layout) {
+        if (layout.totalTokens !== seqLen || scaledScores.cols !== seqLen) {
+          return yield* Effect.fail(
+            new Ops.ShapeError(
+              `SelfAttention.attention: layout totalTokens (${layout.totalTokens}) incompatible with scores shape ${seqLen}x${scaledScores.cols}`
+            )
+          )
+        }
+        const sequenceIds = layout.sequenceIds
+        const positionIds = layout.positionIds
+        const scoresData = scaledScores.data
+        for (let i = 0; i < seqLen; i++) {
+          const rowOffset = i * seqLen
+          const querySequenceId = sequenceIds[i]
+          const queryPositionId = positionIds[i]
+          for (let j = 0; j < seqLen; j++) {
+            if (sequenceIds[j] !== querySequenceId || positionIds[j] > queryPositionId) {
+              scoresData[rowOffset + j] = -Infinity
+            }
+          }
+        }
+      } else {
+        for (let i = 0; i < seqLen; i++) {
+          for (let j = i + 1; j < seqLen; j++) {
+            T.set(scaledScores, i, j, -Infinity)
+          }
         }
       }
 
@@ -74,12 +98,12 @@ export class SelfAttention implements ModelLayer {
     })
   }
 
-  forward(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
+  forward(input: Tensor2D, context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
       const fiberId = yield* Effect.fiberId
       const key = this.fiberKey(fiberId)
       const { q, k, v } = yield* this.computeQKV(input)
-      const { attnWeights, attended } = yield* this.attention(q, k, v)
+      const { attnWeights, attended } = yield* this.attention(q, k, v, context?.sequenceLayout)
       const cached = { input, q, k, v, attnWeights }
       this.cache.set(key, cached)
       this.lastCache = cached

@@ -4,7 +4,7 @@ import type { Tensor2D } from "../tensor/Tensor2D"
 import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
 import type { ShapeError } from "../tensor/ops"
-import type { ModelLayer } from "./ModelLayer"
+import type { LayerForwardContext, ModelLayer } from "./ModelLayer"
 import { Adam } from "../training/Adam"
 
 export class LayerNorm implements ModelLayer {
@@ -13,8 +13,8 @@ export class LayerNorm implements ModelLayer {
   gamma: Tensor2D
   beta: Tensor2D
 
-  private cache = new Map<number | string, { input: Tensor2D; mean: Tensor2D; variance: Tensor2D }>()
-  private lastCache: { input: Tensor2D; mean: Tensor2D; variance: Tensor2D } | null = null
+  private cache = new Map<number | string, { normalized: Tensor2D; rstd: Tensor2D }>()
+  private lastCache: { normalized: Tensor2D; rstd: Tensor2D } | null = null
   optimizerGamma: Adam
   optimizerBeta: Adam
 
@@ -33,25 +33,23 @@ export class LayerNorm implements ModelLayer {
     return this.gamma.data.length + this.beta.data.length
   }
 
-  forward(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
+  forward(input: Tensor2D, _context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
       const mean = Ops.meanRows(input)
       const variance = Ops.varRows(input)
+      const rstd = Ops.mapScalar(variance, (v) => 1.0 / Math.sqrt(v + this.epsilon))
+      const centered = yield* Ops.broadcastSubCol(input, mean)
+      const normalized = yield* Ops.broadcastMulCol(centered, rstd)
 
       const fiberId = yield* Effect.fiberId
       const key = this.fiberKey(fiberId)
       const cached = {
-        input: T.clone(input),
-        mean: T.clone(mean),
-        variance: T.clone(variance)
+        normalized,
+        rstd
       }
       this.cache.set(key, cached)
       this.lastCache = cached
 
-      // Use sqrt(variance + epsilon) for numerical stability
-      const rstd = Ops.mapScalar(variance, (v) => 1.0 / Math.sqrt(v + this.epsilon))
-      const centered = yield* Ops.broadcastSubCol(input, mean)
-      const normalized = yield* Ops.broadcastMulCol(centered, rstd)
       const scaled = yield* Ops.broadcastMulRow(normalized, this.gamma)
       const shifted = yield* Ops.broadcastAddRow(scaled, this.beta)
       return shifted
@@ -69,21 +67,16 @@ export class LayerNorm implements ModelLayer {
       this.cache.delete(key)
       this.lastCache = null
 
-      const { input, mean, variance } = cached
-      const rows = input.rows
-      const cols = input.cols
+      const { normalized, rstd } = cached
+      const rows = normalized.rows
+      const cols = normalized.cols
       const nFeatures = cols
 
-      const normalized = T.zeros(rows, cols)
       const gradNormalized = T.zeros(rows, cols)
       for (let i = 0; i < rows; i++) {
-        const meanVal = mean.data[i]
-        // Consistent with forward: rstd = 1 / sqrt(variance + epsilon)
-        const rstd = 1.0 / Math.sqrt(variance.data[i] + this.epsilon)
+        const rowOffset = i * cols
         for (let j = 0; j < cols; j++) {
-          const idx = i * cols + j
-          const norm = (input.data[idx] - meanVal) * rstd
-          normalized.data[idx] = norm
+          const idx = rowOffset + j
           gradNormalized.data[idx] = this.gamma.data[j] * dOut.data[idx]
         }
       }
@@ -104,9 +97,7 @@ export class LayerNorm implements ModelLayer {
 
       const gradInput = T.zeros(rows, cols)
       for (let i = 0; i < rows; i++) {
-        const meanVal = mean.data[i]
-        const varPlusEps = variance.data[i] + this.epsilon
-        const rstd = 1.0 / Math.sqrt(varPlusEps)
+        const rstdVal = rstd.data[i]
 
         let sumGradNormalized = 0
         let sumGradNormTimesNorm = 0
@@ -122,7 +113,7 @@ export class LayerNorm implements ModelLayer {
         for (let j = 0; j < cols; j++) {
           const idx = rowOffset + j
           gradInput.data[idx] =
-            rstd *
+            rstdVal *
             (gradNormalized.data[idx] -
               sumGradNormalized / nFeatures -
               (normalized.data[idx] * sumGradNormTimesNorm) / nFeatures)

@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect"
 import type { Tensor2D } from "../tensor/Tensor2D"
 import type { ShapeError } from "../tensor/ops"
-import type { ModelLayer } from "./ModelLayer"
+import type { LayerForwardContext, ModelLayer } from "./ModelLayer"
 import { SelfAttention } from "./SelfAttention"
 import { FeedForward } from "./FeedForward"
 import { LayerNorm } from "./LayerNorm"
@@ -31,12 +31,12 @@ export class TransformerBlock implements ModelLayer {
     )
   }
 
-  forward(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
+  forward(input: Tensor2D, context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      const attentionOut: Tensor2D = yield* this.attention.forward(input)
-      const norm1Out: Tensor2D = yield* this.norm1.forward(attentionOut)
-      const ffnOut: Tensor2D = yield* this.feedForward.forward(norm1Out)
-      const norm2Out: Tensor2D = yield* this.norm2.forward(ffnOut)
+      const attentionOut: Tensor2D = yield* this.attention.forward(input, context)
+      const norm1Out: Tensor2D = yield* this.norm1.forward(attentionOut, context)
+      const ffnOut: Tensor2D = yield* this.feedForward.forward(norm1Out, context)
+      const norm2Out: Tensor2D = yield* this.norm2.forward(ffnOut, context)
       return norm2Out
     })
   }

@@ -20,7 +20,7 @@ export type { Rng } from "./tensor/random"
 export { seeded } from "./tensor/random"
 export { systemRng } from "./tensor/random"
 
-export type { ModelLayer } from "./model/ModelLayer"
+export type { LayerForwardContext, ModelLayer, SequenceLayout } from "./model/ModelLayer"
 export { Embeddings } from "./model/Embeddings"
 export { SelfAttention } from "./model/SelfAttention"
 export { FeedForward } from "./model/FeedForward"
