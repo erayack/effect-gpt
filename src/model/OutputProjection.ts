@@ -8,6 +8,7 @@ import type { LayerForwardContext, ModelLayer } from "./ModelLayer"
 import { EMBEDDING_DIM } from "../config"
 import { Adam } from "../training/Adam"
 import type { Rng } from "../tensor/random"
+import { TensorWorkspace } from "../tensor/Workspace"
 
 export class OutputProjection implements ModelLayer {
   readonly _tag = "OutputProjection"
@@ -35,8 +36,12 @@ export class OutputProjection implements ModelLayer {
 
   forwardInference(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      const projected = yield* Ops.matMul(input, this.wOut)
-      return yield* Ops.addRowBias(projected, this.bOut)
+      const workspace = new TensorWorkspace()
+      const projected = workspace.borrowTensor("projected", input.rows, this.wOut.cols)
+      const output = T.zeros(input.rows, this.wOut.cols)
+      yield* Ops.matMulInto(input, this.wOut, projected)
+      yield* Ops.addRowBiasInto(projected, this.bOut, output)
+      return output
     })
   }
 
@@ -46,8 +51,11 @@ export class OutputProjection implements ModelLayer {
       const key = this.fiberKey(fiberId)
       this.cache.set(key, input)
       this.lastCache = input
-      const projected = yield* Ops.matMul(input, this.wOut)
-      const output = yield* Ops.addRowBias(projected, this.bOut)
+      const workspace = new TensorWorkspace()
+      const projected = workspace.borrowTensor("projected", input.rows, this.wOut.cols)
+      const output = T.zeros(input.rows, this.wOut.cols)
+      yield* Ops.matMulInto(input, this.wOut, projected)
+      yield* Ops.addRowBiasInto(projected, this.bOut, output)
       return output
     })
   }
@@ -64,12 +72,17 @@ export class OutputProjection implements ModelLayer {
       this.lastCache = null
 
       const input = cachedInput
-      const inputT = Ops.transpose(input)
-      const gradWOut = yield* Ops.matMul(inputT, dOut)
+      const workspace = new TensorWorkspace()
+      const inputT = workspace.borrowTensor("inputT", input.cols, input.rows)
+      Ops.transposeInto(input, inputT)
+      const gradWOut = T.zeros(input.cols, dOut.cols)
+      yield* Ops.matMulInto(inputT, dOut, gradWOut)
       const gradBOut = Ops.sumCols(dOut)
 
-      const wOutT = Ops.transpose(this.wOut)
-      const gradInput = yield* Ops.matMul(dOut, wOutT)
+      const wOutT = workspace.borrowTensor("wOutT", this.wOut.cols, this.wOut.rows)
+      Ops.transposeInto(this.wOut, wOutT)
+      const gradInput = T.zeros(dOut.rows, this.wOut.rows)
+      yield* Ops.matMulInto(dOut, wOutT, gradInput)
 
       this.optimizerWOut.step(this.wOut, gradWOut, lr)
       for (let j = 0; j < this.bOut.data.length; j++) {

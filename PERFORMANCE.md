@@ -14,11 +14,6 @@ Performance work in this repo should preserve the Effect-first architecture.
 
 ### Next
 
-- [ ] **Medium: Reuse scratch buffers / add lower-allocation tensor kernels**
-  - Current state: the hot tensor ops were moved off `T.get`/`T.set`, but most ops still allocate fresh output buffers every call in [src/tensor/ops.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/ops.ts:16).
-  - Impact: allocation pressure remains high during training and inference.
-  - Next step: add in-place or caller-supplied-buffer variants for common kernels where aliasing is safe.
-
 ### Later
 
 - [ ] **Structural: Replace naïve JS GEMM with a stronger backend**
@@ -67,6 +62,20 @@ Performance work in this repo should preserve the Effect-first architecture.
 - [x] **Hot tensor ops were moved off `T.get` / `T.set`**
   - Implemented in [src/tensor/ops.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/ops.ts:16).
   - `matMul`, reductions, transpose, gather/slice, and broadcast helpers now use direct typed-array access and cached offsets.
+
+- [x] **Medium: Reuse scratch buffers / add lower-allocation tensor kernels**
+  - Implemented in:
+    - [src/tensor/Workspace.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/Workspace.ts:1)
+    - [src/tensor/ops.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/ops.ts:16)
+    - [src/model/Embeddings.ts](/Users/erayack/Desktop/code/RustGPT/src/model/Embeddings.ts:1)
+    - [src/model/FeedForward.ts](/Users/erayack/Desktop/code/RustGPT/src/model/FeedForward.ts:1)
+    - [src/model/LayerNorm.ts](/Users/erayack/Desktop/code/RustGPT/src/model/LayerNorm.ts:1)
+    - [src/model/OutputProjection.ts](/Users/erayack/Desktop/code/RustGPT/src/model/OutputProjection.ts:1)
+    - [src/model/SelfAttention.ts](/Users/erayack/Desktop/code/RustGPT/src/model/SelfAttention.ts:1)
+    - [src/training/loss.ts](/Users/erayack/Desktop/code/RustGPT/src/training/loss.ts:1)
+    - [src/training/train.ts](/Users/erayack/Desktop/code/RustGPT/src/training/train.ts:1)
+    - [src/model/LLM.ts](/Users/erayack/Desktop/code/RustGPT/src/model/LLM.ts:1)
+  - Added caller-supplied-buffer and in-place tensor kernels, introduced method-local scratch workspaces for ephemeral intermediates, removed the training softmax allocation by computing loss and gradients directly from logits, and switched token selection back to direct argmax over logits. Returned tensors and cached backward state remain caller-owned so the Effect-first public architecture is unchanged.
 
 - [x] **Attention backward now uses cached forward intermediates**
   - Implemented in [src/model/SelfAttention.ts](/Users/erayack/Desktop/code/RustGPT/src/model/SelfAttention.ts:19).

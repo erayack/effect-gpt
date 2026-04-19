@@ -11,7 +11,7 @@ import * as T from "../tensor/Tensor2D"
 import { tokenize } from "../tokenize/tokenize"
 import type { LLM } from "../model/LLM"
 import type { SequenceLayout } from "../model/ModelLayer"
-import { softmaxRows, crossEntropyLossAndDLogits } from "./loss"
+import { crossEntropyLossAndDLogitsFromLogits } from "./loss"
 import { clipGlobalL2 } from "./clip"
 import type { LoggerServiceId } from "../services/Logger"
 import { info } from "../services/Logger"
@@ -241,9 +241,8 @@ const trainWithStreamFactory = <E, R>(
           }
 
           const logits = input
-          const probs = yield* wrapThrowing(() => softmaxRows(logits), mapShapeUnknown)
           const { loss, grads: initialGrads } = yield* wrapThrowing(
-            () => crossEntropyLossAndDLogits(probs, batch.targetIds),
+            () => crossEntropyLossAndDLogitsFromLogits(logits, batch.targetIds),
             mapShapeUnknown
           )
           yield* Ref.update(totalLossRef, (current) => current + loss * batch.tokenCount)

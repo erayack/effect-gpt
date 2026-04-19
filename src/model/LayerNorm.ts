@@ -6,6 +6,7 @@ import * as Ops from "../tensor/ops"
 import type { ShapeError } from "../tensor/ops"
 import type { LayerForwardContext, ModelLayer } from "./ModelLayer"
 import { Adam } from "../training/Adam"
+import { TensorWorkspace } from "../tensor/Workspace"
 
 export class LayerNorm implements ModelLayer {
   readonly _tag = "LayerNorm"
@@ -35,23 +36,74 @@ export class LayerNorm implements ModelLayer {
 
   forwardInference(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      const mean = Ops.meanRows(input)
-      const variance = Ops.varRows(input)
-      const rstd = Ops.mapScalar(variance, (v) => 1.0 / Math.sqrt(v + this.epsilon))
-      const centered = yield* Ops.broadcastSubCol(input, mean)
-      const normalized = yield* Ops.broadcastMulCol(centered, rstd)
-      const scaled = yield* Ops.broadcastMulRow(normalized, this.gamma)
-      return yield* Ops.broadcastAddRow(scaled, this.beta)
+      const workspace = new TensorWorkspace()
+      const mean = workspace.borrowVector("mean", input.rows)
+      const rstd = workspace.borrowVector("rstd", input.rows)
+      const output = T.zeros(input.rows, input.cols)
+
+      for (let row = 0; row < input.rows; row++) {
+        const rowOffset = row * input.cols
+        let sum = 0
+        for (let col = 0; col < input.cols; col++) {
+          sum += input.data[rowOffset + col]!
+        }
+        mean[row] = sum / input.cols
+      }
+
+      for (let row = 0; row < input.rows; row++) {
+        const rowOffset = row * input.cols
+        let sumSq = 0
+        for (let col = 0; col < input.cols; col++) {
+          const diff = input.data[rowOffset + col]! - mean[row]!
+          sumSq += diff * diff
+        }
+        rstd[row] = 1.0 / Math.sqrt(sumSq / input.cols + this.epsilon)
+      }
+
+      for (let row = 0; row < input.rows; row++) {
+        const rowOffset = row * input.cols
+        const rowRstd = rstd[row]!
+        const rowMean = mean[row]!
+        for (let col = 0; col < input.cols; col++) {
+          const normalizedValue = (input.data[rowOffset + col]! - rowMean) * rowRstd
+          output.data[rowOffset + col] = normalizedValue * this.gamma.data[col]! + this.beta.data[col]!
+        }
+      }
+
+      return output
     })
   }
 
   forward(input: Tensor2D, _context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      const mean = Ops.meanRows(input)
-      const variance = Ops.varRows(input)
-      const rstd = Ops.mapScalar(variance, (v) => 1.0 / Math.sqrt(v + this.epsilon))
-      const centered = yield* Ops.broadcastSubCol(input, mean)
-      const normalized = yield* Ops.broadcastMulCol(centered, rstd)
+      const workspace = new TensorWorkspace()
+      const mean = workspace.borrowVector("mean", input.rows)
+      const normalized = T.zeros(input.rows, input.cols)
+      const rstd = T.zeros(input.rows, 1)
+
+      for (let row = 0; row < input.rows; row++) {
+        const rowOffset = row * input.cols
+        let sum = 0
+        for (let col = 0; col < input.cols; col++) {
+          sum += input.data[rowOffset + col]!
+        }
+        mean[row] = sum / input.cols
+      }
+
+      for (let row = 0; row < input.rows; row++) {
+        const rowOffset = row * input.cols
+        let sumSq = 0
+        const rowMean = mean[row]!
+        for (let col = 0; col < input.cols; col++) {
+          const diff = input.data[rowOffset + col]! - rowMean
+          sumSq += diff * diff
+        }
+        const rowRstd = 1.0 / Math.sqrt(sumSq / input.cols + this.epsilon)
+        rstd.data[row] = rowRstd
+        for (let col = 0; col < input.cols; col++) {
+          normalized.data[rowOffset + col] = (input.data[rowOffset + col]! - rowMean) * rowRstd
+        }
+      }
 
       const fiberId = yield* Effect.fiberId
       const key = this.fiberKey(fiberId)
@@ -62,8 +114,13 @@ export class LayerNorm implements ModelLayer {
       this.cache.set(key, cached)
       this.lastCache = cached
 
-      const scaled = yield* Ops.broadcastMulRow(normalized, this.gamma)
-      const shifted = yield* Ops.broadcastAddRow(scaled, this.beta)
+      const shifted = T.zeros(input.rows, input.cols)
+      for (let row = 0; row < input.rows; row++) {
+        const rowOffset = row * input.cols
+        for (let col = 0; col < input.cols; col++) {
+          shifted.data[rowOffset + col] = normalized.data[rowOffset + col]! * this.gamma.data[col]! + this.beta.data[col]!
+        }
+      }
       return shifted
     })
   }

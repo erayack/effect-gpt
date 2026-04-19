@@ -8,6 +8,7 @@ import type { LayerForwardContext, ModelLayer } from "./ModelLayer"
 import { EMBEDDING_DIM, HIDDEN_DIM } from "../config"
 import { Adam } from "../training/Adam"
 import type { Rng } from "../tensor/random"
+import { TensorWorkspace } from "../tensor/Workspace"
 
 export class FeedForward implements ModelLayer {
   readonly _tag = "FeedForward"
@@ -47,12 +48,19 @@ export class FeedForward implements ModelLayer {
 
   forwardInference(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      const h1 = yield* Ops.matMul(input, this.w1)
-      const h1Bias = yield* Ops.addRowBias(h1, this.b1)
-      const h1Relu = Ops.relu(h1Bias)
-      const h2 = yield* Ops.matMul(h1Relu, this.w2)
-      const h2Bias = yield* Ops.addRowBias(h2, this.b2)
-      return yield* Ops.add(h2Bias, input)
+      const workspace = new TensorWorkspace()
+      const hiddenPre = workspace.borrowTensor("hiddenPre", input.rows, this.w1.cols)
+      const hiddenPost = T.zeros(input.rows, this.w1.cols)
+      const outputPre = workspace.borrowTensor("outputPre", input.rows, this.w2.cols)
+      const output = T.zeros(input.rows, input.cols)
+
+      yield* Ops.matMulInto(input, this.w1, hiddenPre)
+      yield* Ops.addRowBiasInPlace(hiddenPre, this.b1)
+      Ops.reluInto(hiddenPre, hiddenPost)
+      yield* Ops.matMulInto(hiddenPost, this.w2, outputPre)
+      yield* Ops.addRowBiasInPlace(outputPre, this.b2)
+      yield* Ops.addInto(outputPre, input, output)
+      return output
     })
   }
 
@@ -61,9 +69,12 @@ export class FeedForward implements ModelLayer {
       const fiberId = yield* Effect.fiberId
       const key = this.fiberKey(fiberId)
 
-      const h1 = yield* Ops.matMul(input, this.w1)
-      const h1Bias = yield* Ops.addRowBias(h1, this.b1)
-      const h1Relu = Ops.relu(h1Bias)
+      const workspace = new TensorWorkspace()
+      const hiddenPre = workspace.borrowTensor("hiddenPre", input.rows, this.w1.cols)
+      const h1Relu = T.zeros(input.rows, this.w1.cols)
+      yield* Ops.matMulInto(input, this.w1, hiddenPre)
+      yield* Ops.addRowBiasInPlace(hiddenPre, this.b1)
+      Ops.reluInto(hiddenPre, h1Relu)
       const cached = {
         input,
         hiddenPostActivation: h1Relu
@@ -71,9 +82,11 @@ export class FeedForward implements ModelLayer {
       this.cache.set(key, cached)
       this.lastCache = cached
 
-      const h2 = yield* Ops.matMul(h1Relu, this.w2)
-      const h2Bias = yield* Ops.addRowBias(h2, this.b2)
-      const output = yield* Ops.add(h2Bias, input)
+      const outputPre = workspace.borrowTensor("outputPre", input.rows, this.w2.cols)
+      const output = T.zeros(input.rows, input.cols)
+      yield* Ops.matMulInto(h1Relu, this.w2, outputPre)
+      yield* Ops.addRowBiasInPlace(outputPre, this.b2)
+      yield* Ops.addInto(outputPre, input, output)
       return output
     })
   }
@@ -90,27 +103,37 @@ export class FeedForward implements ModelLayer {
       this.lastCache = null
 
       const { input, hiddenPostActivation } = cached
-
-      const hiddenPostT = Ops.transpose(hiddenPostActivation)
-      const gradW2 = yield* Ops.matMul(hiddenPostT, dOut)
+      const workspace = new TensorWorkspace()
+      const hiddenPostT = workspace.borrowTensor("hiddenPostT", hiddenPostActivation.cols, hiddenPostActivation.rows)
+      Ops.transposeInto(hiddenPostActivation, hiddenPostT)
+      const gradW2 = T.zeros(hiddenPostActivation.cols, dOut.cols)
+      yield* Ops.matMulInto(hiddenPostT, dOut, gradW2)
       const gradB2 = Ops.sumCols(dOut)
 
-      const w2T = Ops.transpose(this.w2)
-      const gradHiddenPost = yield* Ops.matMul(dOut, w2T)
+      const w2T = workspace.borrowTensor("w2T", this.w2.cols, this.w2.rows)
+      Ops.transposeInto(this.w2, w2T)
+      const gradHiddenPost = workspace.borrowTensor("gradHiddenPost", dOut.rows, w2T.cols)
+      yield* Ops.matMulInto(dOut, w2T, gradHiddenPost)
 
-      const reluGrad = T.zeros(hiddenPostActivation.rows, hiddenPostActivation.cols)
+      const reluGrad = workspace.borrowTensor("reluGrad", hiddenPostActivation.rows, hiddenPostActivation.cols)
       for (let i = 0; i < hiddenPostActivation.data.length; i++) {
         reluGrad.data[i] = hiddenPostActivation.data[i] > 0 ? 1 : 0
       }
-      const gradHiddenPre = yield* Ops.mul(gradHiddenPost, reluGrad)
+      const gradHiddenPre = T.zeros(gradHiddenPost.rows, gradHiddenPost.cols)
+      yield* Ops.mulInto(gradHiddenPost, reluGrad, gradHiddenPre)
 
-      const inputT = Ops.transpose(input)
-      const gradW1 = yield* Ops.matMul(inputT, gradHiddenPre)
+      const inputT = workspace.borrowTensor("inputT", input.cols, input.rows)
+      Ops.transposeInto(input, inputT)
+      const gradW1 = T.zeros(input.cols, gradHiddenPre.cols)
+      yield* Ops.matMulInto(inputT, gradHiddenPre, gradW1)
       const gradB1 = Ops.sumCols(gradHiddenPre)
 
-      const w1T = Ops.transpose(this.w1)
-      const gradInputFF = yield* Ops.matMul(gradHiddenPre, w1T)
-      const gradInput = yield* Ops.add(gradInputFF, dOut)
+      const w1T = workspace.borrowTensor("w1T", this.w1.cols, this.w1.rows)
+      Ops.transposeInto(this.w1, w1T)
+      const gradInputFF = workspace.borrowTensor("gradInputFF", gradHiddenPre.rows, w1T.cols)
+      yield* Ops.matMulInto(gradHiddenPre, w1T, gradInputFF)
+      const gradInput = T.zeros(gradInputFF.rows, gradInputFF.cols)
+      yield* Ops.addInto(gradInputFF, dOut, gradInput)
 
       this.optimizerW2.step(this.w2, gradW2, lr)
       this.optimizerB2.step(this.b2, gradB2, lr)

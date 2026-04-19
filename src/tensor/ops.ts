@@ -13,9 +13,26 @@ export class ShapeError extends Error {
   }
 }
 
-export const matMul = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> => {
+const validateSameShape = (op: string, a: Tensor2D, b: Tensor2D): void => {
+  if (a.rows !== b.rows || a.cols !== b.cols) {
+    throw new ShapeError(`${op}: shapes (${a.rows},${a.cols}) and (${b.rows},${b.cols}) do not match`)
+  }
+}
+
+const validateOutputShape = (op: string, out: Tensor2D, rows: number, cols: number): void => {
+  if (out.rows !== rows || out.cols !== cols) {
+    throw new ShapeError(`${op}: output shape (${out.rows},${out.cols}) does not match expected (${rows},${cols})`)
+  }
+}
+
+export const matMulInto = (a: Tensor2D, b: Tensor2D, out: Tensor2D): Effect.Effect<void, ShapeError> => {
   if (a.cols !== b.rows) {
     return Effect.fail(new ShapeError(`matMul: a.cols (${a.cols}) !== b.rows (${b.rows})`))
+  }
+  if (out.rows !== a.rows || out.cols !== b.cols) {
+    return Effect.fail(
+      new ShapeError(`matMul: output shape (${out.rows},${out.cols}) does not match expected (${a.rows},${b.cols})`)
+    )
   }
 
   return Effect.sync(() => {
@@ -25,7 +42,8 @@ export const matMul = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeE
 
     const aData = a.data
     const bData = b.data
-    const resultData = new Float32Array(aRows * bCols)
+    const resultData = out.data
+    resultData.fill(0)
 
     for (let i = 0; i < aRows; i++) {
       const resultRowOffset = i * bCols
@@ -48,28 +66,37 @@ export const matMul = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeE
         }
       }
     }
-
-    return T.make(aRows, bCols, resultData)
   })
 }
 
-export const add = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
+export const matMul = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> => {
+  return Effect.gen(function* () {
+    const out = T.zeros(a.rows, b.cols)
+    yield* matMulInto(a, b, out)
+    return out
+  })
+}
+
+export const addInto = (a: Tensor2D, b: Tensor2D, out: Tensor2D): Effect.Effect<void, ShapeError> =>
   Effect.sync(() => {
-    if (a.rows !== b.rows || a.cols !== b.cols) {
-      throw new ShapeError(`add: shapes (${a.rows},${a.cols}) and (${b.rows},${b.cols}) do not match`)
-    }
-    const data = new Float32Array(a.data.length)
+    validateSameShape("add", a, b)
+    validateOutputShape("add", out, a.rows, a.cols)
+    const data = out.data
     for (let i = 0; i < data.length; i++) {
       data[i] = a.data[i] + b.data[i]
     }
-    return T.make(a.rows, a.cols, data)
   }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+
+export const add = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
+  Effect.gen(function* () {
+    const out = T.zeros(a.rows, a.cols)
+    yield* addInto(a, b, out)
+    return out
+  })
 
 export const sub = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
   Effect.sync(() => {
-    if (a.rows !== b.rows || a.cols !== b.cols) {
-      throw new ShapeError(`sub: shapes (${a.rows},${a.cols}) and (${b.rows},${b.cols}) do not match`)
-    }
+    validateSameShape("sub", a, b)
     const data = new Float32Array(a.data.length)
     for (let i = 0; i < data.length; i++) {
       data[i] = a.data[i] - b.data[i]
@@ -77,23 +104,26 @@ export const sub = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeErro
     return T.make(a.rows, a.cols, data)
   }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
 
-export const mul = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
+export const mulInto = (a: Tensor2D, b: Tensor2D, out: Tensor2D): Effect.Effect<void, ShapeError> =>
   Effect.sync(() => {
-    if (a.rows !== b.rows || a.cols !== b.cols) {
-      throw new ShapeError(`mul: shapes (${a.rows},${a.cols}) and (${b.rows},${b.cols}) do not match`)
-    }
-    const data = new Float32Array(a.data.length)
+    validateSameShape("mul", a, b)
+    validateOutputShape("mul", out, a.rows, a.cols)
+    const data = out.data
     for (let i = 0; i < data.length; i++) {
       data[i] = a.data[i] * b.data[i]
     }
-    return T.make(a.rows, a.cols, data)
   }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+
+export const mul = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
+  Effect.gen(function* () {
+    const out = T.zeros(a.rows, a.cols)
+    yield* mulInto(a, b, out)
+    return out
+  })
 
 export const div = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
   Effect.sync(() => {
-    if (a.rows !== b.rows || a.cols !== b.cols) {
-      throw new ShapeError(`div: shapes (${a.rows},${a.cols}) and (${b.rows},${b.cols}) do not match`)
-    }
+    validateSameShape("div", a, b)
     const data = new Float32Array(a.data.length)
     for (let i = 0; i < data.length; i++) {
       data[i] = a.data[i] / b.data[i]
@@ -109,6 +139,12 @@ export const addScalar = (t: Tensor2D, scalar: number): Tensor2D => {
   return T.make(t.rows, t.cols, data)
 }
 
+export const mulScalarInPlace = (t: Tensor2D, scalar: number): void => {
+  for (let i = 0; i < t.data.length; i++) {
+    t.data[i] *= scalar
+  }
+}
+
 export const mulScalar = (t: Tensor2D, scalar: number): Tensor2D => {
   const data = new Float32Array(t.data.length)
   for (let i = 0; i < data.length; i++) {
@@ -117,7 +153,7 @@ export const mulScalar = (t: Tensor2D, scalar: number): Tensor2D => {
   return T.make(t.rows, t.cols, data)
 }
 
-export const addRowBias = (matrix: Tensor2D, bias: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
+export const addRowBiasInPlace = (matrix: Tensor2D, bias: Tensor2D): Effect.Effect<void, ShapeError> =>
   Effect.sync(() => {
     if (bias.rows !== 1 || bias.cols !== matrix.cols) {
       throw new ShapeError(`addRowBias: bias shape (${bias.rows},${bias.cols}) incompatible with matrix cols ${matrix.cols}`)
@@ -126,15 +162,39 @@ export const addRowBias = (matrix: Tensor2D, bias: Tensor2D): Effect.Effect<Tens
     const cols = matrix.cols
     const matrixData = matrix.data
     const biasData = bias.data
-    const data = new Float32Array(matrix.data.length)
     for (let i = 0; i < rows; i++) {
       const rowOffset = i * cols
       for (let j = 0; j < cols; j++) {
-        data[rowOffset + j] = matrixData[rowOffset + j] + biasData[j]
+        matrixData[rowOffset + j] += biasData[j]
       }
     }
-    return T.make(rows, cols, data)
   }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+
+export const addRowBiasInto = (matrix: Tensor2D, bias: Tensor2D, out: Tensor2D): Effect.Effect<void, ShapeError> =>
+  Effect.sync(() => {
+    if (bias.rows !== 1 || bias.cols !== matrix.cols) {
+      throw new ShapeError(`addRowBias: bias shape (${bias.rows},${bias.cols}) incompatible with matrix cols ${matrix.cols}`)
+    }
+    validateOutputShape("addRowBias", out, matrix.rows, matrix.cols)
+    const rows = matrix.rows
+    const cols = matrix.cols
+    const matrixData = matrix.data
+    const biasData = bias.data
+    const outData = out.data
+    for (let i = 0; i < rows; i++) {
+      const rowOffset = i * cols
+      for (let j = 0; j < cols; j++) {
+        outData[rowOffset + j] = matrixData[rowOffset + j] + biasData[j]
+      }
+    }
+  }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+
+export const addRowBias = (matrix: Tensor2D, bias: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
+  Effect.gen(function* () {
+    const out = T.zeros(matrix.rows, matrix.cols)
+    yield* addRowBiasInto(matrix, bias, out)
+    return out
+  })
 
 export const meanRows = (t: Tensor2D): Tensor2D => {
   const rows = t.rows
@@ -153,10 +213,17 @@ export const meanRows = (t: Tensor2D): Tensor2D => {
 }
 
 export const sumCols = (t: Tensor2D): Tensor2D => {
+  const out = T.zeros(1, t.cols)
+  sumColsInto(t, out)
+  return out
+}
+
+export const sumColsInto = (t: Tensor2D, out: Tensor2D): void => {
+  validateOutputShape("sumCols", out, 1, t.cols)
   const rows = t.rows
   const cols = t.cols
   const tData = t.data
-  const data = new Float32Array(cols)
+  const data = out.data
   for (let j = 0; j < cols; j++) {
     let sum = 0
     for (let i = 0; i < rows; i++) {
@@ -164,7 +231,6 @@ export const sumCols = (t: Tensor2D): Tensor2D => {
     }
     data[j] = sum
   }
-  return T.make(1, cols, data)
 }
 
 export const meanCols = (t: Tensor2D): Tensor2D => {
@@ -230,22 +296,29 @@ export const mapScalar = (t: Tensor2D, fn: (val: number) => number): Tensor2D =>
 }
 
 export const softmaxRows = (t: Tensor2D): Tensor2D => {
-  const data = new Float32Array(t.data.length)
-  const tData = t.data
-  const cols = t.cols
+  const out = T.zeros(t.rows, t.cols)
+  softmaxRowsInto(t, out)
+  return out
+}
 
-  for (let i = 0; i < t.rows; i++) {
+export const softmaxRowsInto = (input: Tensor2D, out: Tensor2D): void => {
+  validateOutputShape("softmaxRows", out, input.rows, input.cols)
+  const data = out.data
+  const inputData = input.data
+  const cols = input.cols
+
+  for (let i = 0; i < input.rows; i++) {
     const rowOffset = i * cols
     let maxVal = -Infinity
 
     for (let j = 0; j < cols; j++) {
-      const val = tData[rowOffset + j]
+      const val = inputData[rowOffset + j]
       if (val > maxVal) maxVal = val
     }
 
     let sumExp = 0
     for (let j = 0; j < cols; j++) {
-      const exp = Math.exp(tData[rowOffset + j] - maxVal)
+      const exp = Math.exp(inputData[rowOffset + j] - maxVal)
       data[rowOffset + j] = exp
       sumExp += exp
     }
@@ -254,30 +327,61 @@ export const softmaxRows = (t: Tensor2D): Tensor2D => {
       data[rowOffset + j] /= sumExp
     }
   }
+}
 
-  return T.make(t.rows, t.cols, data)
+export const softmaxRowsInPlace = (t: Tensor2D): void => {
+  const data = t.data
+  const cols = t.cols
+
+  for (let i = 0; i < t.rows; i++) {
+    const rowOffset = i * cols
+    let maxVal = -Infinity
+
+    for (let j = 0; j < cols; j++) {
+      const val = data[rowOffset + j]
+      if (val > maxVal) maxVal = val
+    }
+
+    let sumExp = 0
+    for (let j = 0; j < cols; j++) {
+      const exp = Math.exp(data[rowOffset + j] - maxVal)
+      data[rowOffset + j] = exp
+      sumExp += exp
+    }
+
+    for (let j = 0; j < cols; j++) {
+      data[rowOffset + j] /= sumExp
+    }
+  }
 }
 
 export const transpose = (t: Tensor2D): Tensor2D => {
+  const out = T.zeros(t.cols, t.rows)
+  transposeInto(t, out)
+  return out
+}
+
+export const transposeInto = (t: Tensor2D, out: Tensor2D): void => {
+  validateOutputShape("transpose", out, t.cols, t.rows)
   const rows = t.rows
   const cols = t.cols
   const tData = t.data
-  const data = new Float32Array(rows * cols)
+  const data = out.data
   for (let i = 0; i < rows; i++) {
     const rowOffset = i * cols
     for (let j = 0; j < cols; j++) {
       data[j * rows + i] = tData[rowOffset + j]
     }
   }
-  return T.make(cols, rows, data)
 }
 
-export const gatherRows = (embeddings: Tensor2D, tokenIds: ArrayLike<number>): Effect.Effect<Tensor2D, ShapeError> =>
+export const gatherRowsInto = (embeddings: Tensor2D, tokenIds: ArrayLike<number>, out: Tensor2D): Effect.Effect<void, ShapeError> =>
   Effect.sync(() => {
+    validateOutputShape("gatherRows", out, tokenIds.length, embeddings.cols)
     const cols = embeddings.cols
     const rows = embeddings.rows
     const embeddingsData = embeddings.data
-    const data = new Float32Array(tokenIds.length * cols)
+    const data = out.data
     for (let i = 0; i < tokenIds.length; i++) {
       const tokenId = tokenIds[i]
       if (tokenId < 0 || tokenId >= rows) {
@@ -289,10 +393,16 @@ export const gatherRows = (embeddings: Tensor2D, tokenIds: ArrayLike<number>): E
         data[targetOffset + j] = embeddingsData[sourceOffset + j]
       }
     }
-    return T.make(tokenIds.length, cols, data)
   }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
 
-export const sliceRows = (t: Tensor2D, start: number, end: number): Effect.Effect<Tensor2D, ShapeError> =>
+export const gatherRows = (embeddings: Tensor2D, tokenIds: ArrayLike<number>): Effect.Effect<Tensor2D, ShapeError> =>
+  Effect.gen(function* () {
+    const out = T.zeros(tokenIds.length, embeddings.cols)
+    yield* gatherRowsInto(embeddings, tokenIds, out)
+    return out
+  })
+
+export const sliceRowsInto = (t: Tensor2D, start: number, end: number, out: Tensor2D): Effect.Effect<void, ShapeError> =>
   Effect.sync(() => {
     if (start < 0 || end > t.rows || start >= end) {
       throw new ShapeError(`sliceRows: invalid range [${start}, ${end}) for tensor with ${t.rows} rows`)
@@ -300,7 +410,8 @@ export const sliceRows = (t: Tensor2D, start: number, end: number): Effect.Effec
     const cols = t.cols
     const tData = t.data
     const numRows = end - start
-    const data = new Float32Array(numRows * cols)
+    validateOutputShape("sliceRows", out, numRows, cols)
+    const data = out.data
     for (let i = 0; i < numRows; i++) {
       const sourceOffset = (start + i) * cols
       const targetOffset = i * cols
@@ -308,26 +419,52 @@ export const sliceRows = (t: Tensor2D, start: number, end: number): Effect.Effec
         data[targetOffset + j] = tData[sourceOffset + j]
       }
     }
-    return T.make(numRows, cols, data)
   }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
 
-export const rowAsMatrix = (t: Tensor2D, row: number): Effect.Effect<Tensor2D, ShapeError> =>
+export const sliceRows = (t: Tensor2D, start: number, end: number): Effect.Effect<Tensor2D, ShapeError> =>
+  Effect.gen(function* () {
+    if (start < 0 || end > t.rows || start >= end) {
+      return yield* Effect.fail(new ShapeError(`sliceRows: invalid range [${start}, ${end}) for tensor with ${t.rows} rows`))
+    }
+    const out = T.zeros(end - start, t.cols)
+    yield* sliceRowsInto(t, start, end, out)
+    return out
+  })
+
+export const rowAsMatrixInto = (t: Tensor2D, row: number, out: Tensor2D): Effect.Effect<void, ShapeError> =>
   Effect.sync(() => {
     if (row < 0 || row >= t.rows) {
       throw new ShapeError(`rowAsMatrix: row ${row} out of bounds for tensor with ${t.rows} rows`)
     }
-
+    validateOutputShape("rowAsMatrix", out, 1, t.cols)
     const start = row * t.cols
-    const data = t.data.slice(start, start + t.cols)
-    return T.make(1, t.cols, data)
+    out.data.set(t.data.subarray(start, start + t.cols))
   }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
 
-export const relu = (t: Tensor2D): Tensor2D => {
-  const data = new Float32Array(t.data.length)
-  for (let i = 0; i < data.length; i++) {
-    data[i] = Math.max(0, t.data[i])
+export const rowAsMatrix = (t: Tensor2D, row: number): Effect.Effect<Tensor2D, ShapeError> =>
+  Effect.gen(function* () {
+    const out = T.zeros(1, t.cols)
+    yield* rowAsMatrixInto(t, row, out)
+    return out
+  })
+
+export const reluInPlace = (t: Tensor2D): void => {
+  for (let i = 0; i < t.data.length; i++) {
+    t.data[i] = Math.max(0, t.data[i])
   }
-  return T.make(t.rows, t.cols, data)
+}
+
+export const reluInto = (input: Tensor2D, out: Tensor2D): void => {
+  validateOutputShape("relu", out, input.rows, input.cols)
+  for (let i = 0; i < out.data.length; i++) {
+    out.data[i] = Math.max(0, input.data[i])
+  }
+}
+
+export const relu = (t: Tensor2D): Tensor2D => {
+  const out = T.zeros(t.rows, t.cols)
+  reluInto(t, out)
+  return out
 }
 
 export const argmaxRows = (t: Tensor2D): ReadonlyArray<number> => {
@@ -373,6 +510,42 @@ export const broadcastSubCol = (t: Tensor2D, col: Tensor2D): Effect.Effect<Tenso
     }
     return T.make(rows, cols, data)
   }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+
+export const maskCausalInPlace = (scores: Tensor2D, layout?: { sequenceIds: Int32Array; positionIds: Int32Array; totalTokens: number }): void => {
+  const seqLen = scores.rows
+  if (scores.cols !== seqLen) {
+    throw new ShapeError(`maskCausalInPlace: expected square scores matrix, received ${scores.rows}x${scores.cols}`)
+  }
+
+  if (layout) {
+    if (layout.totalTokens !== seqLen) {
+      throw new ShapeError(
+        `maskCausalInPlace: layout totalTokens (${layout.totalTokens}) incompatible with scores shape ${seqLen}x${scores.cols}`
+      )
+    }
+    const sequenceIds = layout.sequenceIds
+    const positionIds = layout.positionIds
+    const scoresData = scores.data
+    for (let i = 0; i < seqLen; i++) {
+      const rowOffset = i * seqLen
+      const querySequenceId = sequenceIds[i]
+      const queryPositionId = positionIds[i]
+      for (let j = 0; j < seqLen; j++) {
+        if (sequenceIds[j] !== querySequenceId || positionIds[j] > queryPositionId) {
+          scoresData[rowOffset + j] = -Infinity
+        }
+      }
+    }
+    return
+  }
+
+  for (let i = 0; i < seqLen; i++) {
+    const rowOffset = i * seqLen
+    for (let j = i + 1; j < seqLen; j++) {
+      scores.data[rowOffset + j] = -Infinity
+    }
+  }
+}
 
 export const broadcastDivCol = (t: Tensor2D, col: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
   Effect.sync(() => {

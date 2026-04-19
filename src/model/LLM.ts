@@ -130,9 +130,20 @@ export class LLM {
   }
 
   private decodeNextToken(logits: Tensor2D): number {
-    const probs = Ops.softmaxRows(logits)
-    const tokens = Ops.argmaxRows(probs)
-    return tokens[tokens.length - 1]!
+    const row = logits.rows - 1
+    const rowOffset = row * logits.cols
+    let maxIdx = 0
+    let maxVal = logits.data[rowOffset]!
+
+    for (let col = 1; col < logits.cols; col++) {
+      const value = logits.data[rowOffset + col]!
+      if (value > maxVal) {
+        maxVal = value
+        maxIdx = col
+      }
+    }
+
+    return maxIdx
   }
 
   private forwardFullRecompute(text: string): Effect.Effect<ReadonlyArray<number>, ShapeError> {
@@ -167,8 +178,7 @@ export class LLM {
           break
         }
 
-        const lastLogit = yield* Ops.rowAsMatrix(logits, logits.rows - 1)
-        const nextToken = this.decodeNextToken(lastLogit)
+        const nextToken = this.decodeNextToken(logits)
 
         outputTokens.push(nextToken)
         tokenized.push(nextToken)

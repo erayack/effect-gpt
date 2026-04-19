@@ -8,6 +8,7 @@ import type { LayerForwardContext, ModelLayer, SequenceLayout } from "./ModelLay
 import { EMBEDDING_DIM } from "../config"
 import { Adam } from "../training/Adam"
 import type { Rng } from "../tensor/random"
+import { TensorWorkspace } from "../tensor/Workspace"
 
 export interface SelfAttentionKvCache {
   readonly keys: Float32Array
@@ -66,42 +67,18 @@ export class SelfAttention implements ModelLayer {
   ): Effect.Effect<{ attnWeights: Tensor2D; attended: Tensor2D }, ShapeError> {
     return Effect.gen(this, function* () {
       const dk = Math.sqrt(this.embeddingDim)
-      const kT = Ops.transpose(k)
-      const scores = yield* Ops.matMul(q, kT)
-      const scaledScores = Ops.mulScalar(scores, 1 / dk)
+      const workspace = new TensorWorkspace()
+      const kT = workspace.borrowTensor("kT", k.cols, k.rows)
+      Ops.transposeInto(k, kT)
+      const scores = workspace.borrowTensor("scores", q.rows, kT.cols)
+      yield* Ops.matMulInto(q, kT, scores)
+      Ops.mulScalarInPlace(scores, 1 / dk)
+      Ops.maskCausalInPlace(scores, layout)
 
-      const seqLen = scaledScores.rows
-      if (layout) {
-        if (layout.totalTokens !== seqLen || scaledScores.cols !== seqLen) {
-          return yield* Effect.fail(
-            new Ops.ShapeError(
-              `SelfAttention.attention: layout totalTokens (${layout.totalTokens}) incompatible with scores shape ${seqLen}x${scaledScores.cols}`
-            )
-          )
-        }
-        const sequenceIds = layout.sequenceIds
-        const positionIds = layout.positionIds
-        const scoresData = scaledScores.data
-        for (let i = 0; i < seqLen; i++) {
-          const rowOffset = i * seqLen
-          const querySequenceId = sequenceIds[i]
-          const queryPositionId = positionIds[i]
-          for (let j = 0; j < seqLen; j++) {
-            if (sequenceIds[j] !== querySequenceId || positionIds[j] > queryPositionId) {
-              scoresData[rowOffset + j] = -Infinity
-            }
-          }
-        }
-      } else {
-        for (let i = 0; i < seqLen; i++) {
-          for (let j = i + 1; j < seqLen; j++) {
-            T.set(scaledScores, i, j, -Infinity)
-          }
-        }
-      }
-
-      const attnWeights = Ops.softmaxRows(scaledScores)
-      const attended = yield* Ops.matMul(attnWeights, v)
+      const attnWeights = T.zeros(scores.rows, scores.cols)
+      Ops.softmaxRowsInto(scores, attnWeights)
+      const attended = T.zeros(attnWeights.rows, v.cols)
+      yield* Ops.matMulInto(attnWeights, v, attended)
       return { attnWeights, attended }
     })
   }
@@ -229,6 +206,11 @@ export class SelfAttention implements ModelLayer {
 
   private static softmaxBackward(softmaxOutput: Tensor2D, gradOutput: Tensor2D): Tensor2D {
     const gradInput = T.zeros(softmaxOutput.rows, softmaxOutput.cols)
+    SelfAttention.softmaxBackwardInto(softmaxOutput, gradOutput, gradInput)
+    return gradInput
+  }
+
+  private static softmaxBackwardInto(softmaxOutput: Tensor2D, gradOutput: Tensor2D, gradInput: Tensor2D): void {
     for (let i = 0; i < softmaxOutput.rows; i++) {
       let dot = 0
       const rowOffset = i * softmaxOutput.cols
@@ -241,7 +223,6 @@ export class SelfAttention implements ModelLayer {
         gradInput.data[rowOffset + j] = y * (dy - dot)
       }
     }
-    return gradInput
   }
 
   backward(dOut: Tensor2D, lr: number): Effect.Effect<Tensor2D, ShapeError> {
@@ -257,34 +238,57 @@ export class SelfAttention implements ModelLayer {
 
       const { input, q, k, v, attnWeights } = cached
       const scale = Math.sqrt(this.wQ.cols)
+      const workspace = new TensorWorkspace()
 
-      const vT = Ops.transpose(v)
-      const gradAttnWeights = yield* Ops.matMul(dOut, vT)
-      const attnWeightsT = Ops.transpose(attnWeights)
-      const gradV = yield* Ops.matMul(attnWeightsT, dOut)
+      const vT = workspace.borrowTensor("vT", v.cols, v.rows)
+      Ops.transposeInto(v, vT)
+      const gradAttnWeights = T.zeros(dOut.rows, vT.cols)
+      yield* Ops.matMulInto(dOut, vT, gradAttnWeights)
 
-      const gradScores = SelfAttention.softmaxBackward(attnWeights, gradAttnWeights)
-      const gradScoresScaled = Ops.mulScalar(gradScores, 1 / scale)
+      const attnWeightsT = workspace.borrowTensor("attnWeightsT", attnWeights.cols, attnWeights.rows)
+      Ops.transposeInto(attnWeights, attnWeightsT)
+      const gradV = T.zeros(attnWeightsT.rows, dOut.cols)
+      yield* Ops.matMulInto(attnWeightsT, dOut, gradV)
 
-      const gradQ = yield* Ops.matMul(gradScoresScaled, k)
-      const gradScoresScaledT = Ops.transpose(gradScoresScaled)
-      const gradK = yield* Ops.matMul(gradScoresScaledT, q)
+      const gradScores = T.zeros(attnWeights.rows, attnWeights.cols)
+      SelfAttention.softmaxBackwardInto(attnWeights, gradAttnWeights, gradScores)
+      Ops.mulScalarInPlace(gradScores, 1 / scale)
 
-      const inputT = Ops.transpose(input)
-      const gradWQ = yield* Ops.matMul(inputT, gradQ)
-      const gradWK = yield* Ops.matMul(inputT, gradK)
-      const gradWV = yield* Ops.matMul(inputT, gradV)
+      const gradQ = T.zeros(gradScores.rows, k.cols)
+      yield* Ops.matMulInto(gradScores, k, gradQ)
+      const gradScoresScaledT = workspace.borrowTensor("gradScoresScaledT", gradScores.cols, gradScores.rows)
+      Ops.transposeInto(gradScores, gradScoresScaledT)
+      const gradK = T.zeros(gradScoresScaledT.rows, q.cols)
+      yield* Ops.matMulInto(gradScoresScaledT, q, gradK)
 
-      const wQT = Ops.transpose(this.wQ)
-      const wKT = Ops.transpose(this.wK)
-      const wVT = Ops.transpose(this.wV)
-      const gradInputQ = yield* Ops.matMul(gradQ, wQT)
-      const gradInputK = yield* Ops.matMul(gradK, wKT)
-      const gradInputV = yield* Ops.matMul(gradV, wVT)
+      const inputT = workspace.borrowTensor("inputT", input.cols, input.rows)
+      Ops.transposeInto(input, inputT)
+      const gradWQ = T.zeros(inputT.rows, gradQ.cols)
+      const gradWK = T.zeros(inputT.rows, gradK.cols)
+      const gradWV = T.zeros(inputT.rows, gradV.cols)
+      yield* Ops.matMulInto(inputT, gradQ, gradWQ)
+      yield* Ops.matMulInto(inputT, gradK, gradWK)
+      yield* Ops.matMulInto(inputT, gradV, gradWV)
 
-      const gradInputAttention = yield* Ops.add(gradInputQ, gradInputK)
-      const gradInputAttention2 = yield* Ops.add(gradInputAttention, gradInputV)
-      const gradInput = yield* Ops.add(gradInputAttention2, dOut)
+      const wQT = workspace.borrowTensor("wQT", this.wQ.cols, this.wQ.rows)
+      const wKT = workspace.borrowTensor("wKT", this.wK.cols, this.wK.rows)
+      const wVT = workspace.borrowTensor("wVT", this.wV.cols, this.wV.rows)
+      Ops.transposeInto(this.wQ, wQT)
+      Ops.transposeInto(this.wK, wKT)
+      Ops.transposeInto(this.wV, wVT)
+      const gradInputQ = workspace.borrowTensor("gradInputQ", gradQ.rows, wQT.cols)
+      const gradInputK = workspace.borrowTensor("gradInputK", gradK.rows, wKT.cols)
+      const gradInputV = workspace.borrowTensor("gradInputV", gradV.rows, wVT.cols)
+      yield* Ops.matMulInto(gradQ, wQT, gradInputQ)
+      yield* Ops.matMulInto(gradK, wKT, gradInputK)
+      yield* Ops.matMulInto(gradV, wVT, gradInputV)
+
+      const gradInputAttention = workspace.borrowTensor("gradInputAttention", gradInputQ.rows, gradInputQ.cols)
+      yield* Ops.addInto(gradInputQ, gradInputK, gradInputAttention)
+      const gradInputAttention2 = workspace.borrowTensor("gradInputAttention2", gradInputQ.rows, gradInputQ.cols)
+      yield* Ops.addInto(gradInputAttention, gradInputV, gradInputAttention2)
+      const gradInput = T.zeros(gradInputQ.rows, gradInputQ.cols)
+      yield* Ops.addInto(gradInputAttention2, dOut, gradInput)
 
       this.optimizerWQ.step(this.wQ, gradWQ, lr)
       this.optimizerWK.step(this.wK, gradWK, lr)

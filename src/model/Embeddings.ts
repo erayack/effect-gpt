@@ -1,12 +1,14 @@
 import * as Effect from "effect/Effect"
 import * as FiberId from "effect/FiberId"
 import type { Tensor2D } from "../tensor/Tensor2D"
+import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
 import type { ShapeError } from "../tensor/ops"
 import type { LayerForwardContext, ModelLayer } from "./ModelLayer"
 import { MAX_SEQ_LEN, EMBEDDING_DIM } from "../config"
 import { Adam } from "../training/Adam"
 import type { Rng } from "../tensor/random"
+import { TensorWorkspace } from "../tensor/Workspace"
 
 export class Embeddings implements ModelLayer {
   readonly _tag = "Embeddings"
@@ -48,9 +50,15 @@ export class Embeddings implements ModelLayer {
         )
       }
 
-      const tokenEmbeds = yield* Ops.gatherRows(this.tokenEmbeddings, tokenIds)
-      const posEmbeds = yield* Ops.sliceRows(this.positionalEmbeddings, startPosition, endPosition)
-      return yield* Ops.add(tokenEmbeds, posEmbeds)
+      const workspace = new TensorWorkspace()
+      const tokenEmbeds = workspace.borrowTensor("tokenEmbeds", tokenIds.length, this.tokenEmbeddings.cols)
+      const posEmbeds = workspace.borrowTensor("posEmbeds", tokenIds.length, this.positionalEmbeddings.cols)
+      const combined = T.zeros(tokenIds.length, this.tokenEmbeddings.cols)
+
+      yield* Ops.gatherRowsInto(this.tokenEmbeddings, tokenIds, tokenEmbeds)
+      yield* Ops.sliceRowsInto(this.positionalEmbeddings, startPosition, endPosition, posEmbeds)
+      yield* Ops.addInto(tokenEmbeds, posEmbeds, combined)
+      return combined
     })
   }
 
@@ -92,11 +100,18 @@ export class Embeddings implements ModelLayer {
       this.cache.set(key, { tokenIds, positionIds })
       this.lastCache = { tokenIds, positionIds }
 
-      const tokenEmbeds = yield* Ops.gatherRows(this.tokenEmbeddings, tokenIds)
-      const posEmbeds = layout
-        ? yield* Ops.gatherRows(this.positionalEmbeddings, positionIds)
-        : yield* Ops.sliceRows(this.positionalEmbeddings, 0, seqLen)
-      const combined = yield* Ops.add(tokenEmbeds, posEmbeds)
+      const workspace = new TensorWorkspace()
+      const tokenEmbeds = workspace.borrowTensor("tokenEmbeds", seqLen, this.tokenEmbeddings.cols)
+      const posEmbeds = workspace.borrowTensor("posEmbeds", seqLen, this.positionalEmbeddings.cols)
+      const combined = T.zeros(seqLen, this.tokenEmbeddings.cols)
+
+      yield* Ops.gatherRowsInto(this.tokenEmbeddings, tokenIds, tokenEmbeds)
+      if (layout) {
+        yield* Ops.gatherRowsInto(this.positionalEmbeddings, positionIds, posEmbeds)
+      } else {
+        yield* Ops.sliceRowsInto(this.positionalEmbeddings, 0, seqLen, posEmbeds)
+      }
+      yield* Ops.addInto(tokenEmbeds, posEmbeds, combined)
       return combined
     })
   }

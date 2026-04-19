@@ -65,3 +65,57 @@ export const crossEntropyLossAndDLogits = (
     grads: T.make(probs.rows, probs.cols, data)
   }
 }
+
+export const crossEntropyLossAndDLogitsFromLogits = (
+  logits: Tensor2D,
+  targetIds: ArrayLike<number>
+): { loss: number; grads: Tensor2D } => {
+  if (logits.rows !== targetIds.length) {
+    throw new Ops.ShapeError(
+      `crossEntropyLossAndDLogitsFromLogits: logits.rows (${logits.rows}) !== targetIds.length (${targetIds.length})`
+    )
+  }
+
+  const data = new Float32Array(logits.data.length)
+  const cols = logits.cols
+  let loss = 0
+
+  for (let row = 0; row < logits.rows; row++) {
+    const rowOffset = row * cols
+    let maxVal = -Infinity
+    for (let col = 0; col < cols; col++) {
+      const value = logits.data[rowOffset + col]!
+      if (value > maxVal) {
+        maxVal = value
+      }
+    }
+
+    let sumExp = 0
+    for (let col = 0; col < cols; col++) {
+      const exp = Math.exp(logits.data[rowOffset + col]! - maxVal)
+      data[rowOffset + col] = exp
+      sumExp += exp
+    }
+
+    for (let col = 0; col < cols; col++) {
+      data[rowOffset + col] /= sumExp
+    }
+
+    const targetIndex = targetIds[row]!
+    const targetOffset = rowOffset + targetIndex
+    const prob = data[targetOffset]!
+    const clamped = prob < 1e-15 ? 1e-15 : prob
+    loss -= Math.log(clamped)
+    data[targetOffset] -= 1
+  }
+
+  const scale = 1 / targetIds.length
+  for (let i = 0; i < data.length; i++) {
+    data[i] *= scale
+  }
+
+  return {
+    loss: loss / targetIds.length,
+    grads: T.make(logits.rows, logits.cols, data)
+  }
+}
