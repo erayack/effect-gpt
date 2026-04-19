@@ -14,11 +14,6 @@ Performance work in this repo should preserve the Effect-first architecture.
 
 ### Next
 
-- [ ] **Medium: Pre-tokenize datasets per run / epoch**
-  - Current state: training still tokenizes raw text inside preprocessing in [src/training/train.ts](/Users/erayack/Desktop/code/RustGPT/src/training/train.ts:123), and dataset streams are reopened each epoch in [src/data/Dataset.ts](/Users/erayack/Desktop/code/RustGPT/src/data/Dataset.ts:11).
-  - Impact: repeated text tokenization becomes wasteful as corpora grow.
-  - Next step: cache tokenized examples in memory for a run, or add a persisted pre-tokenized dataset format.
-
 - [ ] **Medium: Reuse scratch buffers / add lower-allocation tensor kernels**
   - Current state: the hot tensor ops were moved off `T.get`/`T.set`, but most ops still allocate fresh output buffers every call in [src/tensor/ops.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/ops.ts:16).
   - Impact: allocation pressure remains high during training and inference.
@@ -37,6 +32,10 @@ Performance work in this repo should preserve the Effect-first architecture.
   - Next step: keep orchestration in `Effect`, but minimize abstraction overhead inside hot tensor/model paths.
 
 ## Done
+
+- [x] **Pre-tokenize datasets per run / epoch**
+  - Implemented in [src/training/train.ts](/Users/erayack/Desktop/code/RustGPT/src/training/train.ts:1).
+  - Training now supports per-run corpus preparation, reusing prepared minibatches across epochs while keeping `Effect` orchestration intact. `train()` and the CLI opt into the cached path by default, while `trainStream()` preserves per-epoch stream consumption unless callers explicitly set `cacheScope: "perRun"`.
 
 - [x] **KV-cache based incremental decoding**
   - Implemented in:

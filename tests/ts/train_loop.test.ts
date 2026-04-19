@@ -1,11 +1,13 @@
 import { describe, test, expect } from "bun:test"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
+import * as Stream from "effect/Stream"
 import { makeLLM } from "./support/factories"
 import { expectNotClose } from "./support/tensorMatchers"
 import { CANONICAL_SEED } from "./support/seed"
 import {
   train,
+  trainStream,
   makeLLMLayer,
   makeTrainingConfigLayer,
   makePreprocessSettingsLayer
@@ -329,5 +331,79 @@ describe("Train Loop", () => {
 
     expect(losses.length).toBe(3)
     expect(losses[2]).toBeLessThan(losses[0]!)
+  })
+
+  test("trainStream preserves per-epoch stream consumption by default", () => {
+    const llm = createTinyLLM()
+    let streamCalls = 0
+
+    const makeStream = () => {
+      streamCalls += 1
+      return Stream.fromIterable(tinyCorpus)
+    }
+
+    Effect.runSync(
+      trainStream(makeStream).pipe(
+        Effect.provide(makeLLMLayer(llm)),
+        Effect.provide(makeTrainingConfigLayer({ epochs: 3, learningRate: 0.01 })),
+        Effect.provide(TestServicesLayer)
+      )
+    )
+
+    expect(streamCalls).toBe(3)
+  })
+
+  test("trainStream can opt into per-run preprocessing", () => {
+    const llm = createTinyLLM()
+    let streamCalls = 0
+
+    const makeStream = () => {
+      streamCalls += 1
+      return Stream.fromIterable(tinyCorpus)
+    }
+
+    Effect.runSync(
+      trainStream(makeStream).pipe(
+        Effect.provide(makeLLMLayer(llm)),
+        Effect.provide(makeTrainingConfigLayer({ epochs: 3, learningRate: 0.01 })),
+        Effect.provide(BaseTestServicesLayer),
+        Effect.provide(
+          makePreprocessSettingsLayer({
+            concurrency: "unbounded",
+            batchSize: 1,
+            cacheScope: "perRun"
+          })
+        )
+      )
+    )
+
+    expect(streamCalls).toBe(1)
+  })
+
+  test("epochs=0 does not consume the stream even with per-run preprocessing", () => {
+    const llm = createTinyLLM()
+    let streamCalls = 0
+
+    const makeStream = () => {
+      streamCalls += 1
+      return Stream.fromIterable(tinyCorpus)
+    }
+
+    Effect.runSync(
+      trainStream(makeStream).pipe(
+        Effect.provide(makeLLMLayer(llm)),
+        Effect.provide(makeTrainingConfigLayer({ epochs: 0, learningRate: 0.01 })),
+        Effect.provide(BaseTestServicesLayer),
+        Effect.provide(
+          makePreprocessSettingsLayer({
+            concurrency: "unbounded",
+            batchSize: 1,
+            cacheScope: "perRun"
+          })
+        )
+      )
+    )
+
+    expect(streamCalls).toBe(0)
   })
 })

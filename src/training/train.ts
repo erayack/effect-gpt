@@ -30,6 +30,7 @@ export interface TrainingConfig {
 export interface PreprocessSettings {
   readonly concurrency: number | "unbounded"
   readonly batchSize: number
+  readonly cacheScope?: "perRun" | "perEpoch"
 }
 
 class TrainingConfigTag extends Context.Tag("effect-gpt/training/TrainingConfig")<TrainingConfigTag, TrainingConfig>() {}
@@ -52,9 +53,15 @@ export const makePreprocessSettingsLayer = (settings: PreprocessSettings) =>
   Layer.succeed(PreprocessSettings, settings)
 export const DefaultPreprocessSettings: PreprocessSettings = Object.freeze({
   concurrency: "unbounded",
-  batchSize: 1
+  batchSize: 1,
+  cacheScope: "perEpoch"
+})
+export const CachedPreprocessSettings: PreprocessSettings = Object.freeze({
+  ...DefaultPreprocessSettings,
+  cacheScope: "perRun"
 })
 export const DefaultPreprocessSettingsLive = makePreprocessSettingsLayer(DefaultPreprocessSettings)
+export const CachedPreprocessSettingsLive = makePreprocessSettingsLayer(CachedPreprocessSettings)
 
 type TrainEnv =
   | TrainingConfigTag
@@ -109,6 +116,12 @@ interface TrainingBatch {
   readonly layout: SequenceLayout
 }
 
+interface PreparedTrainingCorpus {
+  readonly batches: ReadonlyArray<TrainingBatch>
+  readonly totalExamples: number
+  readonly totalTokens: number
+}
+
 const buildTrainingBatch = (examples: ReadonlyArray<TrainingExample>): TrainingBatch => {
   const exampleCount = examples.length
   let tokenCount = 0
@@ -151,8 +164,42 @@ const buildTrainingBatch = (examples: ReadonlyArray<TrainingExample>): TrainingB
   }
 }
 
+const prepareTrainingCorpus = <E, R>(
+  makeStream: () => Stream.Stream<string, E, R>,
+  preprocess: (text: string) => Effect.Effect<Option.Option<TrainingExample>, TrainingErrorType>,
+  settings: PreprocessSettings
+): Effect.Effect<PreparedTrainingCorpus, TrainingErrorType, R> =>
+  Effect.gen(function* () {
+    const batchSize = Math.max(1, settings.batchSize)
+    const preprocessed = makeStream().pipe(
+      Stream.mapError(TrainingError.fromUnknown),
+      Stream.mapEffect(preprocess, { concurrency: settings.concurrency }),
+      Stream.filterMap((value) => value)
+    )
+
+    const examples = yield* Stream.runCollect(preprocessed)
+    const batches = Array.from(
+      Chunk.chunksOf(batchSize)(examples),
+      (chunk) => buildTrainingBatch(Array.from(chunk))
+    )
+
+    let totalExamples = 0
+    let totalTokens = 0
+    for (const batch of batches) {
+      totalExamples += batch.exampleCount
+      totalTokens += batch.tokenCount
+    }
+
+    return {
+      batches,
+      totalExamples,
+      totalTokens
+    }
+  })
+
 const trainWithStreamFactory = <E, R>(
-  makeStream: () => Stream.Stream<string, E, R>
+  makeStream: () => Stream.Stream<string, E, R>,
+  defaultCacheScope: "perRun" | "perEpoch"
 ): Effect.Effect<void, TrainingErrorType, R | TrainEnv> =>
   Effect.gen(function* () {
     const llm = yield* LLMService
@@ -160,8 +207,7 @@ const trainWithStreamFactory = <E, R>(
     const preprocessSettings = yield* PreprocessSettings
 
     const clipNorm = config.clipNorm ?? 5.0
-    const concurrency = preprocessSettings.concurrency
-    const batchSize = Math.max(1, preprocessSettings.batchSize)
+    const cacheScope = preprocessSettings.cacheScope ?? defaultCacheScope
     const trainConcurrency = yield* resolveTrainConcurrency(config.trainConcurrency)
 
     const epochCounter = yield* counter("epochs_completed")
@@ -180,17 +226,12 @@ const trainWithStreamFactory = <E, R>(
       } satisfies TrainingExample)
     })
 
-    const runEpoch = Effect.fn("Train.runEpoch")(function* (epoch: number) {
+    const runEpoch = Effect.fn("Train.runEpoch")(function* (
+      epoch: number,
+      corpus: PreparedTrainingCorpus
+    ) {
       const epochResult = yield* timed(`epoch_${epoch}`, Effect.gen(function* () {
         const totalLossRef = yield* Ref.make(0)
-        const totalTokensRef = yield* Ref.make(0)
-        const totalExamplesRef = yield* Ref.make(0)
-
-        const preprocessed = makeStream().pipe(
-          Stream.mapError(TrainingError.fromUnknown),
-          Stream.mapEffect(preprocess, { concurrency }),
-          Stream.filterMap((value) => value)
-        )
 
         const trainBatch = Effect.fn("Train.trainBatch")(function* (batch: TrainingBatch) {
           let input = T.fromArray(1, batch.tokenCount, batch.inputIds)
@@ -206,8 +247,6 @@ const trainWithStreamFactory = <E, R>(
             mapShapeUnknown
           )
           yield* Ref.update(totalLossRef, (current) => current + loss * batch.tokenCount)
-          yield* Ref.update(totalTokensRef, (current) => current + batch.tokenCount)
-          yield* Ref.update(totalExamplesRef, (current) => current + batch.exampleCount)
 
           let grads = initialGrads
           clipGlobalL2(grads, clipNorm)
@@ -217,13 +256,11 @@ const trainWithStreamFactory = <E, R>(
           }
         })
 
-        const examples = yield* Stream.runCollect(preprocessed)
-        const batches = Array.from(Chunk.chunksOf(batchSize)(examples), (chunk) => buildTrainingBatch(Array.from(chunk)))
-        yield* Effect.forEach(batches, trainBatch, { concurrency: trainConcurrency, discard: true })
+        yield* Effect.forEach(corpus.batches, trainBatch, { concurrency: trainConcurrency, discard: true })
 
         const totalLoss = yield* Ref.get(totalLossRef)
-        const totalTokens = yield* Ref.get(totalTokensRef)
-        const totalExamples = yield* Ref.get(totalExamplesRef)
+        const totalTokens = corpus.totalTokens
+        const totalExamples = corpus.totalExamples
         yield* examplesCounter.inc(totalExamples)
         return { totalLoss, totalTokens, totalExamples }
       }).pipe(Effect.withSpan("Train.epochLoop")))
@@ -241,16 +278,31 @@ const trainWithStreamFactory = <E, R>(
       })
     })
 
+    if (config.epochs <= 0) {
+      return
+    }
+
+    const prepareEpochCorpus = () => prepareTrainingCorpus(makeStream, preprocess, preprocessSettings)
+
+    if (cacheScope === "perRun") {
+      const corpus = yield* prepareEpochCorpus()
+      for (let epoch = 0; epoch < config.epochs; epoch++) {
+        yield* runEpoch(epoch, corpus)
+      }
+      return
+    }
+
     for (let epoch = 0; epoch < config.epochs; epoch++) {
-      yield* runEpoch(epoch)
+      const corpus = yield* prepareEpochCorpus()
+      yield* runEpoch(epoch, corpus)
     }
   }).pipe(Effect.withSpan("Train.trainWithStreamFactory"))
 
 export const train = (
   examples: ReadonlyArray<string>
 ): Effect.Effect<void, TrainingErrorType, TrainEnv> =>
-  trainWithStreamFactory(() => Stream.fromIterable(examples))
+  trainWithStreamFactory(() => Stream.fromIterable(examples), "perRun")
 
 export const trainStream = <E, R>(
   makeStream: () => Stream.Stream<string, E, R>
-): Effect.Effect<void, TrainingErrorType, R | TrainEnv> => trainWithStreamFactory(makeStream)
+): Effect.Effect<void, TrainingErrorType, R | TrainEnv> => trainWithStreamFactory(makeStream, "perEpoch")

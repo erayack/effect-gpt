@@ -16,7 +16,7 @@ import {
   trainStream,
   makeLLMLayer,
   makeTrainingConfigLayer,
-  DefaultPreprocessSettingsLive
+  CachedPreprocessSettingsLive
 } from "../training/train"
 import { AppConfig, AppConfigLive } from "../config"
 import { PrettyLoggerLive, info } from "../services/Logger"
@@ -100,7 +100,7 @@ const main = Effect.scoped(
     yield* terminal.display(`Output: ${beforeOutput}\n`)
 
     const llmLayer = makeLLMLayer(llm)
-    const baseTrainingLayer = Layer.mergeAll(llmLayer, DefaultPreprocessSettingsLive)
+    const baseTrainingLayer = Layer.mergeAll(llmLayer, CachedPreprocessSettingsLive)
     const runTrainingPhase = Effect.fn("Cli.runTrainingPhase")(function* (
       name: string,
       makeDatasetStream: typeof dataset.pretrainingStream,
