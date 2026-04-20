@@ -39,7 +39,7 @@ export class OutputProjection implements ModelLayer {
       const workspace = new TensorWorkspace()
       const projected = workspace.borrowTensor("projected", input.rows, this.wOut.cols)
       const output = T.zeros(input.rows, this.wOut.cols)
-      yield* Ops.matMulInto(input, this.wOut, projected)
+      yield* Ops.matMulInto(input, this.wOut, projected, { workspace })
       yield* Ops.addRowBiasInto(projected, this.bOut, output)
       return output
     })
@@ -54,7 +54,7 @@ export class OutputProjection implements ModelLayer {
       const workspace = new TensorWorkspace()
       const projected = workspace.borrowTensor("projected", input.rows, this.wOut.cols)
       const output = T.zeros(input.rows, this.wOut.cols)
-      yield* Ops.matMulInto(input, this.wOut, projected)
+      yield* Ops.matMulInto(input, this.wOut, projected, { workspace })
       yield* Ops.addRowBiasInto(projected, this.bOut, output)
       return output
     })
@@ -73,16 +73,12 @@ export class OutputProjection implements ModelLayer {
 
       const input = cachedInput
       const workspace = new TensorWorkspace()
-      const inputT = workspace.borrowTensor("inputT", input.cols, input.rows)
-      Ops.transposeInto(input, inputT)
       const gradWOut = T.zeros(input.cols, dOut.cols)
-      yield* Ops.matMulInto(inputT, dOut, gradWOut)
+      yield* Ops.matMulInto(input, dOut, gradWOut, { transposeA: true, workspace })
       const gradBOut = Ops.sumCols(dOut)
 
-      const wOutT = workspace.borrowTensor("wOutT", this.wOut.cols, this.wOut.rows)
-      Ops.transposeInto(this.wOut, wOutT)
       const gradInput = T.zeros(dOut.rows, this.wOut.rows)
-      yield* Ops.matMulInto(dOut, wOutT, gradInput)
+      yield* Ops.matMulInto(dOut, this.wOut, gradInput, { transposeB: true, workspace })
 
       this.optimizerWOut.step(this.wOut, gradWOut, lr)
       for (let j = 0; j < this.bOut.data.length; j++) {

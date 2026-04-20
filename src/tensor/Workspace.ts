@@ -27,4 +27,15 @@ export class TensorWorkspace {
     this.vectors.set(name, next)
     return next
   }
+
+  borrowVectorAtLeast(name: string, minLength: number): Float32Array {
+    const existing = this.vectors.get(name)
+    if (existing && existing.length >= minLength) {
+      return existing
+    }
+
+    const next = new Float32Array(minLength)
+    this.vectors.set(name, next)
+    return next
+  }
 }

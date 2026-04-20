@@ -4,6 +4,8 @@ import * as T from "./Tensor2D"
 import type { Rng } from "./random"
 import type { RandomServiceId } from "../services/Random"
 import { Random } from "../services/Random"
+import { gemmMultiplyInto } from "./gemm"
+import type { TensorWorkspace } from "./Workspace"
 
 export class ShapeError extends Error {
   readonly _tag = "ShapeError"
@@ -25,54 +27,76 @@ const validateOutputShape = (op: string, out: Tensor2D, rows: number, cols: numb
   }
 }
 
-export const matMulInto = (a: Tensor2D, b: Tensor2D, out: Tensor2D): Effect.Effect<void, ShapeError> => {
-  if (a.cols !== b.rows) {
-    return Effect.fail(new ShapeError(`matMul: a.cols (${a.cols}) !== b.rows (${b.rows})`))
-  }
-  if (out.rows !== a.rows || out.cols !== b.cols) {
+export interface MatMulOptions {
+  readonly transposeA?: boolean
+  readonly transposeB?: boolean
+  // Optional scratch workspace for callers that want to reuse temporary buffers across repeated multiplies.
+  readonly workspace?: TensorWorkspace
+}
+
+const resolveMatMulShape = (
+  a: Tensor2D,
+  b: Tensor2D,
+  options?: MatMulOptions
+): {
+  readonly transposeA: boolean
+  readonly transposeB: boolean
+  readonly outRows: number
+  readonly sharedDim: number
+  readonly bRows: number
+  readonly outCols: number
+} => {
+  const transposeA = options?.transposeA === true
+  const transposeB = options?.transposeB === true
+  const outRows = transposeA ? a.cols : a.rows
+  const sharedDim = transposeA ? a.rows : a.cols
+  const bRows = transposeB ? b.cols : b.rows
+  const outCols = transposeB ? b.rows : b.cols
+  return { transposeA, transposeB, outRows, sharedDim, bRows, outCols }
+}
+
+export const matMulInto = (
+  a: Tensor2D,
+  b: Tensor2D,
+  out: Tensor2D,
+  options?: MatMulOptions
+): Effect.Effect<void, ShapeError> => {
+  const { transposeA, transposeB, outRows, sharedDim, bRows, outCols } = resolveMatMulShape(a, b, options)
+
+  if (sharedDim !== bRows) {
     return Effect.fail(
-      new ShapeError(`matMul: output shape (${out.rows},${out.cols}) does not match expected (${a.rows},${b.cols})`)
+      new ShapeError(
+        `matMul: effective inner dimensions do not match (${outRows},${sharedDim}) x (${bRows},${outCols})`
+      )
     )
+  }
+  if (out.rows !== outRows || out.cols !== outCols) {
+    return Effect.fail(
+      new ShapeError(`matMul: output shape (${out.rows},${out.cols}) does not match expected (${outRows},${outCols})`)
+    )
+  }
+  if (out.data === a.data || out.data === b.data) {
+    return Effect.fail(new ShapeError("matMul: output tensor must not alias input storage"))
   }
 
   return Effect.sync(() => {
-    const aRows = a.rows
-    const aCols = a.cols
-    const bCols = b.cols
-
-    const aData = a.data
-    const bData = b.data
-    const resultData = out.data
-    resultData.fill(0)
-
-    for (let i = 0; i < aRows; i++) {
-      const resultRowOffset = i * bCols
-      const aRowOffset = i * aCols
-
-      for (let k = 0; k < aCols; k++) {
-        const aVal = aData[aRowOffset + k]
-        const bRowOffset = k * bCols
-
-        let j = 0
-        const limit = bCols - (bCols % 4)
-        for (; j < limit; j += 4) {
-          resultData[resultRowOffset + j] += aVal * bData[bRowOffset + j]
-          resultData[resultRowOffset + j + 1] += aVal * bData[bRowOffset + j + 1]
-          resultData[resultRowOffset + j + 2] += aVal * bData[bRowOffset + j + 2]
-          resultData[resultRowOffset + j + 3] += aVal * bData[bRowOffset + j + 3]
-        }
-        for (; j < bCols; j++) {
-          resultData[resultRowOffset + j] += aVal * bData[bRowOffset + j]
-        }
-      }
+    const request = {
+      a,
+      b,
+      out,
+      transposeA,
+      transposeB,
+      ...(options?.workspace ? { workspace: options.workspace } : {})
     }
+    gemmMultiplyInto(request)
   })
 }
 
-export const matMul = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> => {
+export const matMul = (a: Tensor2D, b: Tensor2D, options?: MatMulOptions): Effect.Effect<Tensor2D, ShapeError> => {
   return Effect.gen(function* () {
-    const out = T.zeros(a.rows, b.cols)
-    yield* matMulInto(a, b, out)
+    const { outRows, outCols } = resolveMatMulShape(a, b, options)
+    const out = T.zeros(outRows, outCols)
+    yield* matMulInto(a, b, out, options)
     return out
   })
 }

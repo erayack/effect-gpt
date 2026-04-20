@@ -16,17 +16,21 @@ Performance work in this repo should preserve the Effect-first architecture.
 
 ### Later
 
-- [ ] **Structural: Replace naïve JS GEMM with a stronger backend**
-  - Current state: `Ops.matMul()` is improved but still pure JS in [src/tensor/ops.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/ops.ts:16).
-  - Impact: matrix multiply remains the main long-term throughput ceiling.
-  - Next step: evaluate blocked JS, cached transposed weights, WASM, BLAS, or GPU-backed execution.
-
 - [ ] **Structural: Reduce Effect/runtime overhead inside math-heavy paths**
   - Current state: core kernels still cross `Effect` boundaries frequently in model execution.
   - Impact: runtime overhead is smaller than the algorithmic items above, but still present in inner loops.
   - Next step: keep orchestration in `Effect`, but minimize abstraction overhead inside hot tensor/model paths.
 
 ## Done
+
+- [x] **Structural: Replace naïve JS GEMM with a stronger backend**
+  - Implemented in:
+    - [src/tensor/gemm.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/gemm.ts:1)
+    - [src/tensor/ops.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/ops.ts:1)
+    - [src/model/SelfAttention.ts](/Users/erayack/Desktop/code/RustGPT/src/model/SelfAttention.ts:1)
+    - [src/model/FeedForward.ts](/Users/erayack/Desktop/code/RustGPT/src/model/FeedForward.ts:1)
+    - [src/model/OutputProjection.ts](/Users/erayack/Desktop/code/RustGPT/src/model/OutputProjection.ts:1)
+  - `Ops.matMul()` / `matMulInto()` now route through a transpose-aware blocked JS GEMM backend with caller-owned scratch reuse. Backward and attention paths now use transpose flags instead of materializing temporary transposed tensors for GEMM-only use.
 
 - [x] **Pre-tokenize datasets per run / epoch**
   - Implemented in [src/training/train.ts](/Users/erayack/Desktop/code/RustGPT/src/training/train.ts:1).

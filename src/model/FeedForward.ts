@@ -54,10 +54,10 @@ export class FeedForward implements ModelLayer {
       const outputPre = workspace.borrowTensor("outputPre", input.rows, this.w2.cols)
       const output = T.zeros(input.rows, input.cols)
 
-      yield* Ops.matMulInto(input, this.w1, hiddenPre)
+      yield* Ops.matMulInto(input, this.w1, hiddenPre, { workspace })
       yield* Ops.addRowBiasInPlace(hiddenPre, this.b1)
       Ops.reluInto(hiddenPre, hiddenPost)
-      yield* Ops.matMulInto(hiddenPost, this.w2, outputPre)
+      yield* Ops.matMulInto(hiddenPost, this.w2, outputPre, { workspace })
       yield* Ops.addRowBiasInPlace(outputPre, this.b2)
       yield* Ops.addInto(outputPre, input, output)
       return output
@@ -72,7 +72,7 @@ export class FeedForward implements ModelLayer {
       const workspace = new TensorWorkspace()
       const hiddenPre = workspace.borrowTensor("hiddenPre", input.rows, this.w1.cols)
       const h1Relu = T.zeros(input.rows, this.w1.cols)
-      yield* Ops.matMulInto(input, this.w1, hiddenPre)
+      yield* Ops.matMulInto(input, this.w1, hiddenPre, { workspace })
       yield* Ops.addRowBiasInPlace(hiddenPre, this.b1)
       Ops.reluInto(hiddenPre, h1Relu)
       const cached = {
@@ -84,7 +84,7 @@ export class FeedForward implements ModelLayer {
 
       const outputPre = workspace.borrowTensor("outputPre", input.rows, this.w2.cols)
       const output = T.zeros(input.rows, input.cols)
-      yield* Ops.matMulInto(h1Relu, this.w2, outputPre)
+      yield* Ops.matMulInto(h1Relu, this.w2, outputPre, { workspace })
       yield* Ops.addRowBiasInPlace(outputPre, this.b2)
       yield* Ops.addInto(outputPre, input, output)
       return output
@@ -104,16 +104,12 @@ export class FeedForward implements ModelLayer {
 
       const { input, hiddenPostActivation } = cached
       const workspace = new TensorWorkspace()
-      const hiddenPostT = workspace.borrowTensor("hiddenPostT", hiddenPostActivation.cols, hiddenPostActivation.rows)
-      Ops.transposeInto(hiddenPostActivation, hiddenPostT)
       const gradW2 = T.zeros(hiddenPostActivation.cols, dOut.cols)
-      yield* Ops.matMulInto(hiddenPostT, dOut, gradW2)
+      yield* Ops.matMulInto(hiddenPostActivation, dOut, gradW2, { transposeA: true, workspace })
       const gradB2 = Ops.sumCols(dOut)
 
-      const w2T = workspace.borrowTensor("w2T", this.w2.cols, this.w2.rows)
-      Ops.transposeInto(this.w2, w2T)
-      const gradHiddenPost = workspace.borrowTensor("gradHiddenPost", dOut.rows, w2T.cols)
-      yield* Ops.matMulInto(dOut, w2T, gradHiddenPost)
+      const gradHiddenPost = workspace.borrowTensor("gradHiddenPost", dOut.rows, this.w2.rows)
+      yield* Ops.matMulInto(dOut, this.w2, gradHiddenPost, { transposeB: true, workspace })
 
       const reluGrad = workspace.borrowTensor("reluGrad", hiddenPostActivation.rows, hiddenPostActivation.cols)
       for (let i = 0; i < hiddenPostActivation.data.length; i++) {
@@ -122,16 +118,12 @@ export class FeedForward implements ModelLayer {
       const gradHiddenPre = T.zeros(gradHiddenPost.rows, gradHiddenPost.cols)
       yield* Ops.mulInto(gradHiddenPost, reluGrad, gradHiddenPre)
 
-      const inputT = workspace.borrowTensor("inputT", input.cols, input.rows)
-      Ops.transposeInto(input, inputT)
       const gradW1 = T.zeros(input.cols, gradHiddenPre.cols)
-      yield* Ops.matMulInto(inputT, gradHiddenPre, gradW1)
+      yield* Ops.matMulInto(input, gradHiddenPre, gradW1, { transposeA: true, workspace })
       const gradB1 = Ops.sumCols(gradHiddenPre)
 
-      const w1T = workspace.borrowTensor("w1T", this.w1.cols, this.w1.rows)
-      Ops.transposeInto(this.w1, w1T)
-      const gradInputFF = workspace.borrowTensor("gradInputFF", gradHiddenPre.rows, w1T.cols)
-      yield* Ops.matMulInto(gradHiddenPre, w1T, gradInputFF)
+      const gradInputFF = workspace.borrowTensor("gradInputFF", gradHiddenPre.rows, this.w1.rows)
+      yield* Ops.matMulInto(gradHiddenPre, this.w1, gradInputFF, { transposeB: true, workspace })
       const gradInput = T.zeros(gradInputFF.rows, gradInputFF.cols)
       yield* Ops.addInto(gradInputFF, dOut, gradInput)
 
