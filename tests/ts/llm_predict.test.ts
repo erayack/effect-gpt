@@ -151,4 +151,22 @@ describe("LLM Predict", () => {
 
     expect(actual).toEqual(expected)
   })
+
+  test("full recompute falls back for mixed sync/effect networks", () => {
+    const stubOutput = new StubOutputProjection(vocabWords.length, eosTokenId, 2)
+    const llm = makeLLMWithNetwork({
+      vocabWords,
+      network: [
+        makeEmbeddings(vocabWords.length, { seed: CANONICAL_SEED }),
+        makeTransformerBlock({ seed: CANONICAL_SEED }),
+        stubOutput
+      ]
+    })
+
+    const actual = runEffect(llm.forward("hello world"))
+    stubOutput.resetCallCount()
+    const expected = forwardWithFullRecompute(llm, "hello world")
+
+    expect(actual).toEqual(expected)
+  })
 })

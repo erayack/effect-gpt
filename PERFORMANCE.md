@@ -10,18 +10,21 @@ Performance work in this repo should preserve the Effect-first architecture.
 - Optimize hot internals without abandoning `Effect` as the architectural model.
 - Favor direct typed-array loops, smaller caches, fewer allocations, and less recomputation inside kernels and backward passes over removing `Effect` from the surrounding design.
 
-## Remaining
-
-### Next
-
-### Later
-
-- [ ] **Structural: Reduce Effect/runtime overhead inside math-heavy paths**
-  - Current state: core kernels still cross `Effect` boundaries frequently in model execution.
-  - Impact: runtime overhead is smaller than the algorithmic items above, but still present in inner loops.
-  - Next step: keep orchestration in `Effect`, but minimize abstraction overhead inside hot tensor/model paths.
-
 ## Done
+
+- [x] **Structural: Reduce Effect/runtime overhead inside math-heavy paths**
+  - Implemented in:
+    - [src/model/ModelLayer.ts](/Users/erayack/Desktop/code/RustGPT/src/model/ModelLayer.ts:1)
+    - [src/tensor/ops.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/ops.ts:1)
+    - [src/model/Embeddings.ts](/Users/erayack/Desktop/code/RustGPT/src/model/Embeddings.ts:1)
+    - [src/model/SelfAttention.ts](/Users/erayack/Desktop/code/RustGPT/src/model/SelfAttention.ts:1)
+    - [src/model/FeedForward.ts](/Users/erayack/Desktop/code/RustGPT/src/model/FeedForward.ts:1)
+    - [src/model/LayerNorm.ts](/Users/erayack/Desktop/code/RustGPT/src/model/LayerNorm.ts:1)
+    - [src/model/OutputProjection.ts](/Users/erayack/Desktop/code/RustGPT/src/model/OutputProjection.ts:1)
+    - [src/model/TransformerBlock.ts](/Users/erayack/Desktop/code/RustGPT/src/model/TransformerBlock.ts:1)
+    - [src/model/LLM.ts](/Users/erayack/Desktop/code/RustGPT/src/model/LLM.ts:1)
+    - [src/training/train.ts](/Users/erayack/Desktop/code/RustGPT/src/training/train.ts:1)
+  - Hot tensor kernels now expose synchronous internal variants, built-in layers run their math-heavy forward/backward paths synchronously behind the existing `Effect` API, and training/inference traverse sync-capable networks inside a small number of outer `Effect` boundaries. Public orchestration and service integration remain `Effect`-first, while mixed custom networks still fall back to the effect-per-layer path.
 
 - [x] **Structural: Replace naïve JS GEMM with a stronger backend**
   - Implemented in:

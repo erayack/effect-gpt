@@ -10,7 +10,7 @@ import * as Ops from "../tensor/ops"
 import * as T from "../tensor/Tensor2D"
 import { tokenize } from "../tokenize/tokenize"
 import type { LLM } from "../model/LLM"
-import type { SequenceLayout } from "../model/ModelLayer"
+import { runBackwardPass, runForwardPass, type SequenceLayout } from "../model/ModelLayer"
 import { crossEntropyLossAndDLogitsFromLogits } from "./loss"
 import { clipGlobalL2 } from "./clip"
 import type { LoggerServiceId } from "../services/Logger"
@@ -235,10 +235,9 @@ const trainWithStreamFactory = <E, R>(
 
         const trainBatch = Effect.fn("Train.trainBatch")(function* (batch: TrainingBatch) {
           let input = T.fromArray(1, batch.tokenCount, batch.inputIds)
-          const context = { sequenceLayout: batch.layout }
-          for (const layer of llm.network) {
-            input = yield* mapShapeError(layer.forward(input, context))
-          }
+          const cacheKey = Symbol("train-batch")
+          const context = { sequenceLayout: batch.layout, cacheKey, captureCache: true }
+          input = yield* mapShapeError(runForwardPass(llm.network, input, context))
 
           const logits = input
           const { loss, grads: initialGrads } = yield* wrapThrowing(
@@ -250,9 +249,7 @@ const trainWithStreamFactory = <E, R>(
           let grads = initialGrads
           clipGlobalL2(grads, clipNorm)
 
-          for (let i = llm.network.length - 1; i >= 0; i--) {
-            grads = yield* mapShapeError(llm.network[i]!.backward(grads, config.learningRate))
-          }
+          grads = yield* mapShapeError(runBackwardPass(llm.network, grads, config.learningRate, cacheKey))
         })
 
         yield* Effect.forEach(corpus.batches, trainBatch, { concurrency: trainConcurrency, discard: true })

@@ -4,7 +4,7 @@ import type { Tensor2D } from "../tensor/Tensor2D"
 import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
 import type { ShapeError } from "../tensor/ops"
-import type { ModelLayer } from "./ModelLayer"
+import { runForwardPass, type ModelLayer } from "./ModelLayer"
 import { Embeddings } from "./Embeddings"
 import { TransformerBlock } from "./TransformerBlock"
 import { OutputProjection } from "./OutputProjection"
@@ -18,14 +18,28 @@ interface IncrementalEmbeddings {
   forwardToken(tokenId: number, position: number): Effect.Effect<Tensor2D, ShapeError>
 }
 
+interface SyncIncrementalEmbeddings extends IncrementalEmbeddings {
+  forwardTokensSync(tokenIds: ReadonlyArray<number>): Tensor2D
+  forwardTokenSync(tokenId: number, position: number): Tensor2D
+}
+
 interface IncrementalTransformerBlock {
   createDecodeState(capacity: number): unknown
   prefill(input: Tensor2D, state: unknown): Effect.Effect<Tensor2D, ShapeError>
   decodeStep(input: Tensor2D, state: unknown): Effect.Effect<Tensor2D, ShapeError>
 }
 
+interface SyncIncrementalTransformerBlock extends IncrementalTransformerBlock {
+  prefillSync(input: Tensor2D, state: unknown): Tensor2D
+  decodeStepSync(input: Tensor2D, state: unknown): Tensor2D
+}
+
 interface IncrementalOutputProjection {
   forwardInference(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError>
+}
+
+interface SyncIncrementalOutputProjection extends IncrementalOutputProjection {
+  forwardInferenceSync(input: Tensor2D): Tensor2D
 }
 
 export class LLM {
@@ -111,6 +125,38 @@ export class LLM {
     )
   }
 
+  private static hasSyncIncrementalEmbeddings(layer: ModelLayer): layer is ModelLayer & SyncIncrementalEmbeddings {
+    return (
+      LLM.hasIncrementalEmbeddings(layer) &&
+      "forwardTokensSync" in layer &&
+      typeof (layer as { forwardTokensSync?: unknown }).forwardTokensSync === "function" &&
+      "forwardTokenSync" in layer &&
+      typeof (layer as { forwardTokenSync?: unknown }).forwardTokenSync === "function"
+    )
+  }
+
+  private static hasSyncIncrementalTransformerBlock(
+    layer: ModelLayer
+  ): layer is ModelLayer & SyncIncrementalTransformerBlock {
+    return (
+      LLM.hasIncrementalTransformerBlock(layer) &&
+      "prefillSync" in layer &&
+      typeof (layer as { prefillSync?: unknown }).prefillSync === "function" &&
+      "decodeStepSync" in layer &&
+      typeof (layer as { decodeStepSync?: unknown }).decodeStepSync === "function"
+    )
+  }
+
+  private static hasSyncIncrementalOutputProjection(
+    layer: ModelLayer
+  ): layer is ModelLayer & SyncIncrementalOutputProjection {
+    return (
+      LLM.hasIncrementalOutputProjection(layer) &&
+      "forwardInferenceSync" in layer &&
+      typeof (layer as { forwardInferenceSync?: unknown }).forwardInferenceSync === "function"
+    )
+  }
+
   private isIncrementalNetwork(): boolean {
     if (this.network.length < 2) {
       return false
@@ -169,9 +215,7 @@ export class LLM {
         const tokenInput = T.fromArray(1, tokenized.length, tokenized)
         let input: Tensor2D = tokenInput
 
-        for (const layer of this.network) {
-          input = yield* layer.forward(input)
-        }
+        input = yield* runForwardPass(this.network, input, { captureCache: false })
 
         const logits = input
         if (logits.rows === 0) {
@@ -193,6 +237,68 @@ export class LLM {
   }
 
   private forwardIncremental(text: string): Effect.Effect<ReadonlyArray<number>, ShapeError> {
+    if (
+      this.network.length >= 2 &&
+      LLM.hasSyncIncrementalEmbeddings(this.network[0]!) &&
+      LLM.hasSyncIncrementalOutputProjection(this.network[this.network.length - 1]!) &&
+      this.network.slice(1, -1).every(LLM.hasSyncIncrementalTransformerBlock)
+    ) {
+      return Ops.syncShapeEffect(() => {
+        const tokenized: Array<number> = [...tokenize(text, this.vocab)]
+        const outputTokens: Array<number> = []
+
+        if (tokenized.length === 0) {
+          return outputTokens
+        }
+
+        const inputLen = tokenized.length
+        if (inputLen >= MAX_SEQ_LEN) {
+          return outputTokens
+        }
+
+        const endTokenId = this.vocab.encode("</s>")
+        if (Option.isNone(endTokenId)) {
+          throw new Ops.ShapeError("End token </s> not found in vocabulary")
+        }
+
+        const embeddings = this.network[0]! as ModelLayer & SyncIncrementalEmbeddings
+        const outputProjection = this.network[this.network.length - 1]! as ModelLayer &
+          SyncIncrementalOutputProjection
+        const blocks = this.network.slice(1, -1) as ReadonlyArray<ModelLayer & SyncIncrementalTransformerBlock>
+        const decodeStates = blocks.map((block) => block.createDecodeState(MAX_SEQ_LEN))
+
+        let hidden = embeddings.forwardTokensSync(tokenized)
+        for (let i = 0; i < blocks.length; i++) {
+          hidden = blocks[i]!.prefillSync(hidden, decodeStates[i]!)
+        }
+
+        const lastHidden = Ops.rowAsMatrixSync(hidden, hidden.rows - 1)
+        let logits = outputProjection.forwardInferenceSync(lastHidden)
+
+        for (let step = 0; step < MAX_SEQ_LEN - inputLen; step++) {
+          if (outputTokens.length >= MAX_SEQ_LEN - 1) {
+            break
+          }
+
+          const nextToken = this.decodeNextToken(logits)
+          outputTokens.push(nextToken)
+          tokenized.push(nextToken)
+
+          if (nextToken === endTokenId.value || tokenized.length >= MAX_SEQ_LEN) {
+            break
+          }
+
+          hidden = embeddings.forwardTokenSync(nextToken, tokenized.length - 1)
+          for (let i = 0; i < blocks.length; i++) {
+            hidden = blocks[i]!.decodeStepSync(hidden, decodeStates[i]!)
+          }
+          logits = outputProjection.forwardInferenceSync(hidden)
+        }
+
+        return outputTokens
+      })
+    }
+
     return Effect.gen(this, function* () {
       const tokenized: Array<number> = [...tokenize(text, this.vocab)]
       const outputTokens: Array<number> = []

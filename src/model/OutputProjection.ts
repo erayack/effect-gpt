@@ -4,13 +4,13 @@ import type { Tensor2D } from "../tensor/Tensor2D"
 import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
 import type { ShapeError } from "../tensor/ops"
-import type { LayerForwardContext, ModelLayer } from "./ModelLayer"
+import type { LayerCacheKey, LayerForwardContext, SyncModelLayer } from "./ModelLayer"
 import { EMBEDDING_DIM } from "../config"
 import { Adam } from "../training/Adam"
 import type { Rng } from "../tensor/random"
 import { TensorWorkspace } from "../tensor/Workspace"
 
-export class OutputProjection implements ModelLayer {
+export class OutputProjection implements SyncModelLayer {
   readonly _tag = "OutputProjection"
   wOut: Tensor2D
   bOut: Tensor2D
@@ -34,58 +34,81 @@ export class OutputProjection implements ModelLayer {
     return this.wOut.data.length + this.bOut.data.length
   }
 
+  private storeCache(cacheKey: LayerCacheKey | undefined, input: Tensor2D): void {
+    if (cacheKey !== undefined) {
+      this.cache.set(cacheKey, input)
+    }
+    this.lastCache = input
+  }
+
+  private forwardCore(input: Tensor2D, captureCache: boolean, cacheKey?: LayerCacheKey): Tensor2D {
+    if (captureCache) {
+      this.storeCache(cacheKey, input)
+    }
+    const workspace = new TensorWorkspace()
+    const projected = workspace.borrowTensor("projected", input.rows, this.wOut.cols)
+    const output = T.zeros(input.rows, this.wOut.cols)
+    Ops.matMulIntoSync(input, this.wOut, projected, { workspace })
+    Ops.addRowBiasIntoSync(projected, this.bOut, output)
+    return output
+  }
+
+  forwardInferenceSync(input: Tensor2D): Tensor2D {
+    return this.forwardCore(input, false)
+  }
+
   forwardInference(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
+    return Ops.syncShapeEffect(() => this.forwardInferenceSync(input))
+  }
+
+  forwardSync(input: Tensor2D, context?: LayerForwardContext): Tensor2D {
+    return this.forwardCore(input, context?.captureCache !== false, context?.cacheKey)
+  }
+
+  forward(input: Tensor2D, context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
-      const workspace = new TensorWorkspace()
-      const projected = workspace.borrowTensor("projected", input.rows, this.wOut.cols)
-      const output = T.zeros(input.rows, this.wOut.cols)
-      yield* Ops.matMulInto(input, this.wOut, projected, { workspace })
-      yield* Ops.addRowBiasInto(projected, this.bOut, output)
-      return output
+      const fiberId = yield* Effect.fiberId
+      return yield* Ops.syncShapeEffect(() =>
+        this.forwardSync(input, {
+          ...context,
+          cacheKey: context?.cacheKey ?? this.fiberKey(fiberId),
+          captureCache: context?.captureCache ?? true
+        })
+      )
     })
   }
 
-  forward(input: Tensor2D, _context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
-    return Effect.gen(this, function* () {
-      const fiberId = yield* Effect.fiberId
-      const key = this.fiberKey(fiberId)
-      this.cache.set(key, input)
-      this.lastCache = input
-      const workspace = new TensorWorkspace()
-      const projected = workspace.borrowTensor("projected", input.rows, this.wOut.cols)
-      const output = T.zeros(input.rows, this.wOut.cols)
-      yield* Ops.matMulInto(input, this.wOut, projected, { workspace })
-      yield* Ops.addRowBiasInto(projected, this.bOut, output)
-      return output
-    })
+  backwardSync(dOut: Tensor2D, lr: number, cacheKey?: LayerCacheKey): Tensor2D {
+    const cachedInput = (cacheKey !== undefined ? this.cache.get(cacheKey) : undefined) ?? this.lastCache
+    if (!cachedInput) {
+      throw new Ops.ShapeError("OutputProjection.backward called before forward")
+    }
+    if (cacheKey !== undefined) {
+      this.cache.delete(cacheKey)
+    }
+    this.lastCache = null
+
+    const input = cachedInput
+    const workspace = new TensorWorkspace()
+    const gradWOut = T.zeros(input.cols, dOut.cols)
+    Ops.matMulIntoSync(input, dOut, gradWOut, { transposeA: true, workspace })
+    const gradBOut = Ops.sumCols(dOut)
+
+    const gradInput = T.zeros(dOut.rows, this.wOut.rows)
+    Ops.matMulIntoSync(dOut, this.wOut, gradInput, { transposeB: true, workspace })
+
+    this.optimizerWOut.step(this.wOut, gradWOut, lr)
+    for (let j = 0; j < this.bOut.data.length; j++) {
+      this.bOut.data[j] -= lr * gradBOut.data[j]
+    }
+
+    return gradInput
   }
 
   backward(dOut: Tensor2D, lr: number): Effect.Effect<Tensor2D, ShapeError> {
     return Effect.gen(this, function* () {
       const fiberId = yield* Effect.fiberId
-      const key = this.fiberKey(fiberId)
-      const cachedInput = this.cache.get(key) ?? this.lastCache
-      if (!cachedInput) {
-        return yield* Effect.fail(new Ops.ShapeError("OutputProjection.backward called before forward"))
-      }
-      this.cache.delete(key)
-      this.lastCache = null
-
-      const input = cachedInput
-      const workspace = new TensorWorkspace()
-      const gradWOut = T.zeros(input.cols, dOut.cols)
-      yield* Ops.matMulInto(input, dOut, gradWOut, { transposeA: true, workspace })
-      const gradBOut = Ops.sumCols(dOut)
-
-      const gradInput = T.zeros(dOut.rows, this.wOut.rows)
-      yield* Ops.matMulInto(dOut, this.wOut, gradInput, { transposeB: true, workspace })
-
-      this.optimizerWOut.step(this.wOut, gradWOut, lr)
-      for (let j = 0; j < this.bOut.data.length; j++) {
-        this.bOut.data[j] -= lr * gradBOut.data[j]
-      }
-
-      return gradInput
+      return yield* Ops.syncShapeEffect(() => this.backwardSync(dOut, lr, this.fiberKey(fiberId)))
     })
   }
 }

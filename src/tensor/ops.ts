@@ -34,6 +34,15 @@ export interface MatMulOptions {
   readonly workspace?: TensorWorkspace
 }
 
+export const toShapeError = (error: unknown): ShapeError =>
+  error instanceof ShapeError ? error : (error as ShapeError)
+
+export const syncShapeEffect = <A>(thunk: () => A): Effect.Effect<A, ShapeError> =>
+  Effect.try({
+    try: thunk,
+    catch: toShapeError
+  })
+
 const resolveMatMulShape = (
   a: Tensor2D,
   b: Tensor2D,
@@ -55,68 +64,80 @@ const resolveMatMulShape = (
   return { transposeA, transposeB, outRows, sharedDim, bRows, outCols }
 }
 
+export const matMulIntoSync = (
+  a: Tensor2D,
+  b: Tensor2D,
+  out: Tensor2D,
+  options?: MatMulOptions
+): void => {
+  const { transposeA, transposeB, outRows, sharedDim, bRows, outCols } = resolveMatMulShape(a, b, options)
+
+  if (sharedDim !== bRows) {
+    throw new ShapeError(
+      `matMul: effective inner dimensions do not match (${outRows},${sharedDim}) x (${bRows},${outCols})`
+    )
+  }
+  if (out.rows !== outRows || out.cols !== outCols) {
+    throw new ShapeError(`matMul: output shape (${out.rows},${out.cols}) does not match expected (${outRows},${outCols})`)
+  }
+  if (out.data === a.data || out.data === b.data) {
+    throw new ShapeError("matMul: output tensor must not alias input storage")
+  }
+
+  const request = {
+    a,
+    b,
+    out,
+    transposeA,
+    transposeB,
+    ...(options?.workspace ? { workspace: options.workspace } : {})
+  }
+  gemmMultiplyInto(request)
+}
+
 export const matMulInto = (
   a: Tensor2D,
   b: Tensor2D,
   out: Tensor2D,
   options?: MatMulOptions
-): Effect.Effect<void, ShapeError> => {
-  const { transposeA, transposeB, outRows, sharedDim, bRows, outCols } = resolveMatMulShape(a, b, options)
-
-  if (sharedDim !== bRows) {
-    return Effect.fail(
-      new ShapeError(
-        `matMul: effective inner dimensions do not match (${outRows},${sharedDim}) x (${bRows},${outCols})`
-      )
-    )
-  }
-  if (out.rows !== outRows || out.cols !== outCols) {
-    return Effect.fail(
-      new ShapeError(`matMul: output shape (${out.rows},${out.cols}) does not match expected (${outRows},${outCols})`)
-    )
-  }
-  if (out.data === a.data || out.data === b.data) {
-    return Effect.fail(new ShapeError("matMul: output tensor must not alias input storage"))
-  }
-
-  return Effect.sync(() => {
-    const request = {
-      a,
-      b,
-      out,
-      transposeA,
-      transposeB,
-      ...(options?.workspace ? { workspace: options.workspace } : {})
-    }
-    gemmMultiplyInto(request)
+): Effect.Effect<void, ShapeError> =>
+  syncShapeEffect(() => {
+    matMulIntoSync(a, b, out, options)
   })
+
+export const matMulSync = (a: Tensor2D, b: Tensor2D, options?: MatMulOptions): Tensor2D => {
+  const { outRows, outCols } = resolveMatMulShape(a, b, options)
+  const out = T.zeros(outRows, outCols)
+  matMulIntoSync(a, b, out, options)
+  return out
 }
 
 export const matMul = (a: Tensor2D, b: Tensor2D, options?: MatMulOptions): Effect.Effect<Tensor2D, ShapeError> => {
-  return Effect.gen(function* () {
-    const { outRows, outCols } = resolveMatMulShape(a, b, options)
-    const out = T.zeros(outRows, outCols)
-    yield* matMulInto(a, b, out, options)
-    return out
-  })
+  return syncShapeEffect(() => matMulSync(a, b, options))
+}
+
+export const addIntoSync = (a: Tensor2D, b: Tensor2D, out: Tensor2D): void => {
+  validateSameShape("add", a, b)
+  validateOutputShape("add", out, a.rows, a.cols)
+  const data = out.data
+  for (let i = 0; i < data.length; i++) {
+    data[i] = a.data[i] + b.data[i]
+  }
 }
 
 export const addInto = (a: Tensor2D, b: Tensor2D, out: Tensor2D): Effect.Effect<void, ShapeError> =>
-  Effect.sync(() => {
-    validateSameShape("add", a, b)
-    validateOutputShape("add", out, a.rows, a.cols)
-    const data = out.data
-    for (let i = 0; i < data.length; i++) {
-      data[i] = a.data[i] + b.data[i]
-    }
-  }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+  syncShapeEffect(() => {
+    addIntoSync(a, b, out)
+  })
+
+export const addSync = (a: Tensor2D, b: Tensor2D): Tensor2D => {
+  const out = T.zeros(a.rows, a.cols)
+  addIntoSync(a, b, out)
+  return out
+}
 
 export const add = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
-  Effect.gen(function* () {
-    const out = T.zeros(a.rows, a.cols)
-    yield* addInto(a, b, out)
-    return out
-  })
+  syncShapeEffect(() => addSync(a, b))
 
 export const sub = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
   Effect.sync(() => {
@@ -128,15 +149,19 @@ export const sub = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeErro
     return T.make(a.rows, a.cols, data)
   }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
 
+export const mulIntoSync = (a: Tensor2D, b: Tensor2D, out: Tensor2D): void => {
+  validateSameShape("mul", a, b)
+  validateOutputShape("mul", out, a.rows, a.cols)
+  const data = out.data
+  for (let i = 0; i < data.length; i++) {
+    data[i] = a.data[i] * b.data[i]
+  }
+}
+
 export const mulInto = (a: Tensor2D, b: Tensor2D, out: Tensor2D): Effect.Effect<void, ShapeError> =>
-  Effect.sync(() => {
-    validateSameShape("mul", a, b)
-    validateOutputShape("mul", out, a.rows, a.cols)
-    const data = out.data
-    for (let i = 0; i < data.length; i++) {
-      data[i] = a.data[i] * b.data[i]
-    }
-  }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+  syncShapeEffect(() => {
+    mulIntoSync(a, b, out)
+  })
 
 export const mul = (a: Tensor2D, b: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
   Effect.gen(function* () {
@@ -177,46 +202,54 @@ export const mulScalar = (t: Tensor2D, scalar: number): Tensor2D => {
   return T.make(t.rows, t.cols, data)
 }
 
+export const addRowBiasInPlaceSync = (matrix: Tensor2D, bias: Tensor2D): void => {
+  if (bias.rows !== 1 || bias.cols !== matrix.cols) {
+    throw new ShapeError(`addRowBias: bias shape (${bias.rows},${bias.cols}) incompatible with matrix cols ${matrix.cols}`)
+  }
+  const rows = matrix.rows
+  const cols = matrix.cols
+  const matrixData = matrix.data
+  const biasData = bias.data
+  for (let i = 0; i < rows; i++) {
+    const rowOffset = i * cols
+    for (let j = 0; j < cols; j++) {
+      matrixData[rowOffset + j] += biasData[j]
+    }
+  }
+}
+
 export const addRowBiasInPlace = (matrix: Tensor2D, bias: Tensor2D): Effect.Effect<void, ShapeError> =>
-  Effect.sync(() => {
-    if (bias.rows !== 1 || bias.cols !== matrix.cols) {
-      throw new ShapeError(`addRowBias: bias shape (${bias.rows},${bias.cols}) incompatible with matrix cols ${matrix.cols}`)
+  syncShapeEffect(() => {
+    addRowBiasInPlaceSync(matrix, bias)
+  })
+
+export const addRowBiasIntoSync = (matrix: Tensor2D, bias: Tensor2D, out: Tensor2D): void => {
+  if (bias.rows !== 1 || bias.cols !== matrix.cols) {
+    throw new ShapeError(`addRowBias: bias shape (${bias.rows},${bias.cols}) incompatible with matrix cols ${matrix.cols}`)
+  }
+  validateOutputShape("addRowBias", out, matrix.rows, matrix.cols)
+  const rows = matrix.rows
+  const cols = matrix.cols
+  const matrixData = matrix.data
+  const biasData = bias.data
+  const outData = out.data
+  for (let i = 0; i < rows; i++) {
+    const rowOffset = i * cols
+    for (let j = 0; j < cols; j++) {
+      outData[rowOffset + j] = matrixData[rowOffset + j] + biasData[j]
     }
-    const rows = matrix.rows
-    const cols = matrix.cols
-    const matrixData = matrix.data
-    const biasData = bias.data
-    for (let i = 0; i < rows; i++) {
-      const rowOffset = i * cols
-      for (let j = 0; j < cols; j++) {
-        matrixData[rowOffset + j] += biasData[j]
-      }
-    }
-  }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+  }
+}
 
 export const addRowBiasInto = (matrix: Tensor2D, bias: Tensor2D, out: Tensor2D): Effect.Effect<void, ShapeError> =>
-  Effect.sync(() => {
-    if (bias.rows !== 1 || bias.cols !== matrix.cols) {
-      throw new ShapeError(`addRowBias: bias shape (${bias.rows},${bias.cols}) incompatible with matrix cols ${matrix.cols}`)
-    }
-    validateOutputShape("addRowBias", out, matrix.rows, matrix.cols)
-    const rows = matrix.rows
-    const cols = matrix.cols
-    const matrixData = matrix.data
-    const biasData = bias.data
-    const outData = out.data
-    for (let i = 0; i < rows; i++) {
-      const rowOffset = i * cols
-      for (let j = 0; j < cols; j++) {
-        outData[rowOffset + j] = matrixData[rowOffset + j] + biasData[j]
-      }
-    }
-  }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+  syncShapeEffect(() => {
+    addRowBiasIntoSync(matrix, bias, out)
+  })
 
 export const addRowBias = (matrix: Tensor2D, bias: Tensor2D): Effect.Effect<Tensor2D, ShapeError> =>
-  Effect.gen(function* () {
+  syncShapeEffect(() => {
     const out = T.zeros(matrix.rows, matrix.cols)
-    yield* addRowBiasInto(matrix, bias, out)
+    addRowBiasIntoSync(matrix, bias, out)
     return out
   })
 
@@ -399,78 +432,92 @@ export const transposeInto = (t: Tensor2D, out: Tensor2D): void => {
   }
 }
 
-export const gatherRowsInto = (embeddings: Tensor2D, tokenIds: ArrayLike<number>, out: Tensor2D): Effect.Effect<void, ShapeError> =>
-  Effect.sync(() => {
-    validateOutputShape("gatherRows", out, tokenIds.length, embeddings.cols)
-    const cols = embeddings.cols
-    const rows = embeddings.rows
-    const embeddingsData = embeddings.data
-    const data = out.data
-    for (let i = 0; i < tokenIds.length; i++) {
-      const tokenId = tokenIds[i]
-      if (tokenId < 0 || tokenId >= rows) {
-        throw new ShapeError(`gatherRows: tokenId ${tokenId} out of bounds [0, ${rows})`)
-      }
-      const sourceOffset = tokenId * cols
-      const targetOffset = i * cols
-      for (let j = 0; j < cols; j++) {
-        data[targetOffset + j] = embeddingsData[sourceOffset + j]
-      }
+export const gatherRowsIntoSync = (embeddings: Tensor2D, tokenIds: ArrayLike<number>, out: Tensor2D): void => {
+  validateOutputShape("gatherRows", out, tokenIds.length, embeddings.cols)
+  const cols = embeddings.cols
+  const rows = embeddings.rows
+  const embeddingsData = embeddings.data
+  const data = out.data
+  for (let i = 0; i < tokenIds.length; i++) {
+    const tokenId = tokenIds[i]
+    if (tokenId < 0 || tokenId >= rows) {
+      throw new ShapeError(`gatherRows: tokenId ${tokenId} out of bounds [0, ${rows})`)
     }
-  }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+    const sourceOffset = tokenId * cols
+    const targetOffset = i * cols
+    for (let j = 0; j < cols; j++) {
+      data[targetOffset + j] = embeddingsData[sourceOffset + j]
+    }
+  }
+}
+
+export const gatherRowsInto = (embeddings: Tensor2D, tokenIds: ArrayLike<number>, out: Tensor2D): Effect.Effect<void, ShapeError> =>
+  syncShapeEffect(() => {
+    gatherRowsIntoSync(embeddings, tokenIds, out)
+  })
 
 export const gatherRows = (embeddings: Tensor2D, tokenIds: ArrayLike<number>): Effect.Effect<Tensor2D, ShapeError> =>
-  Effect.gen(function* () {
+  syncShapeEffect(() => {
     const out = T.zeros(tokenIds.length, embeddings.cols)
-    yield* gatherRowsInto(embeddings, tokenIds, out)
+    gatherRowsIntoSync(embeddings, tokenIds, out)
     return out
   })
 
+export const sliceRowsIntoSync = (t: Tensor2D, start: number, end: number, out: Tensor2D): void => {
+  if (start < 0 || end > t.rows || start >= end) {
+    throw new ShapeError(`sliceRows: invalid range [${start}, ${end}) for tensor with ${t.rows} rows`)
+  }
+  const cols = t.cols
+  const tData = t.data
+  const numRows = end - start
+  validateOutputShape("sliceRows", out, numRows, cols)
+  const data = out.data
+  for (let i = 0; i < numRows; i++) {
+    const sourceOffset = (start + i) * cols
+    const targetOffset = i * cols
+    for (let j = 0; j < cols; j++) {
+      data[targetOffset + j] = tData[sourceOffset + j]
+    }
+  }
+}
+
 export const sliceRowsInto = (t: Tensor2D, start: number, end: number, out: Tensor2D): Effect.Effect<void, ShapeError> =>
-  Effect.sync(() => {
+  syncShapeEffect(() => {
+    sliceRowsIntoSync(t, start, end, out)
+  })
+
+export const sliceRows = (t: Tensor2D, start: number, end: number): Effect.Effect<Tensor2D, ShapeError> =>
+  syncShapeEffect(() => {
     if (start < 0 || end > t.rows || start >= end) {
       throw new ShapeError(`sliceRows: invalid range [${start}, ${end}) for tensor with ${t.rows} rows`)
     }
-    const cols = t.cols
-    const tData = t.data
-    const numRows = end - start
-    validateOutputShape("sliceRows", out, numRows, cols)
-    const data = out.data
-    for (let i = 0; i < numRows; i++) {
-      const sourceOffset = (start + i) * cols
-      const targetOffset = i * cols
-      for (let j = 0; j < cols; j++) {
-        data[targetOffset + j] = tData[sourceOffset + j]
-      }
-    }
-  }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
-
-export const sliceRows = (t: Tensor2D, start: number, end: number): Effect.Effect<Tensor2D, ShapeError> =>
-  Effect.gen(function* () {
-    if (start < 0 || end > t.rows || start >= end) {
-      return yield* Effect.fail(new ShapeError(`sliceRows: invalid range [${start}, ${end}) for tensor with ${t.rows} rows`))
-    }
     const out = T.zeros(end - start, t.cols)
-    yield* sliceRowsInto(t, start, end, out)
+    sliceRowsIntoSync(t, start, end, out)
     return out
   })
+
+export const rowAsMatrixIntoSync = (t: Tensor2D, row: number, out: Tensor2D): void => {
+  if (row < 0 || row >= t.rows) {
+    throw new ShapeError(`rowAsMatrix: row ${row} out of bounds for tensor with ${t.rows} rows`)
+  }
+  validateOutputShape("rowAsMatrix", out, 1, t.cols)
+  const start = row * t.cols
+  out.data.set(t.data.subarray(start, start + t.cols))
+}
 
 export const rowAsMatrixInto = (t: Tensor2D, row: number, out: Tensor2D): Effect.Effect<void, ShapeError> =>
-  Effect.sync(() => {
-    if (row < 0 || row >= t.rows) {
-      throw new ShapeError(`rowAsMatrix: row ${row} out of bounds for tensor with ${t.rows} rows`)
-    }
-    validateOutputShape("rowAsMatrix", out, 1, t.cols)
-    const start = row * t.cols
-    out.data.set(t.data.subarray(start, start + t.cols))
-  }).pipe(Effect.catchAllDefect((e) => Effect.fail(e as ShapeError)))
+  syncShapeEffect(() => {
+    rowAsMatrixIntoSync(t, row, out)
+  })
+
+export const rowAsMatrixSync = (t: Tensor2D, row: number): Tensor2D => {
+  const out = T.zeros(1, t.cols)
+  rowAsMatrixIntoSync(t, row, out)
+  return out
+}
 
 export const rowAsMatrix = (t: Tensor2D, row: number): Effect.Effect<Tensor2D, ShapeError> =>
-  Effect.gen(function* () {
-    const out = T.zeros(1, t.cols)
-    yield* rowAsMatrixInto(t, row, out)
-    return out
-  })
+  syncShapeEffect(() => rowAsMatrixSync(t, row))
 
 export const reluInPlace = (t: Tensor2D): void => {
   for (let i = 0; i < t.data.length; i++) {

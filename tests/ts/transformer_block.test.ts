@@ -1,4 +1,5 @@
 import { describe, test, expect } from "bun:test"
+import * as Effect from "effect/Effect"
 import { runEffect, runEffectFail } from "./support/runEffect"
 import { expectShape, expectNotClose, expectFinite, expectClose } from "./support/tensorMatchers"
 import { makeTransformerBlock } from "./support/factories"
@@ -140,5 +141,30 @@ describe("TransformerBlock", () => {
     const error = runEffectFail(block.prefill(T.ones(1, EMBEDDING_DIM), state))
 
     expect(error.message).toContain("KV cache must be empty before prefill")
+  })
+
+  test("concurrent forward/backward uses isolated caches per fiber", async () => {
+    const block = makeTransformerBlock()
+
+    const inputA = T.ones(2, EMBEDDING_DIM)
+    const inputB = T.zeros(3, EMBEDDING_DIM)
+    for (let i = 0; i < inputB.data.length; i++) {
+      inputB.data[i] = (i % 9) * 0.07
+    }
+
+    const gradA = T.ones(2, EMBEDDING_DIM)
+    const gradB = T.ones(3, EMBEDDING_DIM)
+
+    const runStep = (input: T.Tensor2D, grad: T.Tensor2D) =>
+      block.forward(input).pipe(Effect.flatMap(() => block.backward(grad, 0)))
+
+    const [resultA, resultB] = await Effect.runPromise(
+      Effect.all([runStep(inputA, gradA), runStep(inputB, gradB)], { concurrency: "unbounded" })
+    )
+
+    expectShape(resultA, [2, EMBEDDING_DIM])
+    expectShape(resultB, [3, EMBEDDING_DIM])
+    expectFinite(resultA)
+    expectFinite(resultB)
   })
 })
