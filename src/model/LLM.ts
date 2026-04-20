@@ -264,7 +264,7 @@ export class LLM {
         const embeddings = this.network[0]! as ModelLayer & SyncIncrementalEmbeddings
         const outputProjection = this.network[this.network.length - 1]! as ModelLayer &
           SyncIncrementalOutputProjection
-        const blocks = this.network.slice(1, -1) as ReadonlyArray<ModelLayer & SyncIncrementalTransformerBlock>
+        const blocks = this.network.slice(1, -1) as unknown as ReadonlyArray<ModelLayer & SyncIncrementalTransformerBlock>
         const decodeStates = blocks.map((block) => block.createDecodeState(MAX_SEQ_LEN))
 
         let hidden = embeddings.forwardTokensSync(tokenized)

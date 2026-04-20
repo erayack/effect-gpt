@@ -15,7 +15,7 @@ export class OutputProjection implements SyncModelLayer {
   wOut: Tensor2D
   bOut: Tensor2D
 
-  private cache = new Map<number | string, Tensor2D>()
+  private cache = new Map<LayerCacheKey, Tensor2D>()
   private lastCache: Tensor2D | null = null
   optimizerWOut: Adam
 
@@ -26,7 +26,7 @@ export class OutputProjection implements SyncModelLayer {
     this.optimizerWOut = Adam.make(embeddingDim, vocabSize)
   }
 
-  private fiberKey(fiberId: FiberId.FiberId): number | string {
+  private fiberKey(fiberId: FiberId.FiberId): LayerCacheKey {
     return FiberId.isRuntime(fiberId) ? fiberId.id : JSON.stringify(fiberId)
   }
 

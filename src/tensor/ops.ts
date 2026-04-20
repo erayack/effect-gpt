@@ -281,12 +281,21 @@ export const sumColsInto = (t: Tensor2D, out: Tensor2D): void => {
   const cols = t.cols
   const tData = t.data
   const data = out.data
-  for (let j = 0; j < cols; j++) {
-    let sum = 0
-    for (let i = 0; i < rows; i++) {
-      sum += tData[i * cols + j]
+  data.fill(0)
+
+  for (let i = 0; i < rows; i++) {
+    const rowOffset = i * cols
+    let j = 0
+    const limit = cols - (cols % 4)
+    for (; j < limit; j += 4) {
+      data[j] += tData[rowOffset + j]!
+      data[j + 1] += tData[rowOffset + j + 1]!
+      data[j + 2] += tData[rowOffset + j + 2]!
+      data[j + 3] += tData[rowOffset + j + 3]!
     }
-    data[j] = sum
+    for (; j < cols; j++) {
+      data[j] += tData[rowOffset + j]!
+    }
   }
 }
 

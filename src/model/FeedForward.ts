@@ -17,7 +17,7 @@ export class FeedForward implements SyncModelLayer {
   w2: Tensor2D
   b2: Tensor2D
 
-  private cache = new Map<number | string, { input: Tensor2D; hiddenPostActivation: Tensor2D }>()
+  private cache = new Map<LayerCacheKey, { input: Tensor2D; hiddenPostActivation: Tensor2D }>()
   private lastCache: { input: Tensor2D; hiddenPostActivation: Tensor2D } | null = null
   optimizerW1: Adam
   optimizerB1: Adam
@@ -38,7 +38,7 @@ export class FeedForward implements SyncModelLayer {
     this.optimizerB2 = Adam.make(1, embeddingDim)
   }
 
-  private fiberKey(fiberId: FiberId.FiberId): number | string {
+  private fiberKey(fiberId: FiberId.FiberId): LayerCacheKey {
     return FiberId.isRuntime(fiberId) ? fiberId.id : JSON.stringify(fiberId)
   }
 

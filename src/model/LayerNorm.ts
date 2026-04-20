@@ -14,7 +14,7 @@ export class LayerNorm implements SyncModelLayer {
   gamma: Tensor2D
   beta: Tensor2D
 
-  private cache = new Map<number | string, { normalized: Tensor2D; rstd: Tensor2D }>()
+  private cache = new Map<LayerCacheKey, { normalized: Tensor2D; rstd: Tensor2D }>()
   private lastCache: { normalized: Tensor2D; rstd: Tensor2D } | null = null
   optimizerGamma: Adam
   optimizerBeta: Adam
@@ -26,7 +26,7 @@ export class LayerNorm implements SyncModelLayer {
     this.optimizerBeta = Adam.make(1, embeddingDim)
   }
 
-  private fiberKey(fiberId: FiberId.FiberId): number | string {
+  private fiberKey(fiberId: FiberId.FiberId): LayerCacheKey {
     return FiberId.isRuntime(fiberId) ? fiberId.id : JSON.stringify(fiberId)
   }
 

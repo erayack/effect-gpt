@@ -15,7 +15,7 @@ export class Embeddings implements SyncModelLayer {
   tokenEmbeddings: Tensor2D
   positionalEmbeddings: Tensor2D
 
-  private cache = new Map<number | string, { tokenIds: Int32Array; positionIds: Int32Array }>()
+  private cache = new Map<LayerCacheKey, { tokenIds: Int32Array; positionIds: Int32Array }>()
   private lastCache: { tokenIds: Int32Array; positionIds: Int32Array } | null = null
   tokenOptimizer: Adam
   positionalOptimizer: Adam
@@ -27,7 +27,7 @@ export class Embeddings implements SyncModelLayer {
     this.positionalOptimizer = Adam.make(maxSeqLen, embeddingDim)
   }
 
-  private fiberKey(fiberId: FiberId.FiberId): number | string {
+  private fiberKey(fiberId: FiberId.FiberId): LayerCacheKey {
     return FiberId.isRuntime(fiberId) ? fiberId.id : JSON.stringify(fiberId)
   }
 

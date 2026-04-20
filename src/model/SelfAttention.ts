@@ -25,7 +25,7 @@ export class SelfAttention implements SyncModelLayer {
   wK: Tensor2D
   wV: Tensor2D
 
-  private cache = new Map<number | string, { input: Tensor2D; q: Tensor2D; k: Tensor2D; v: Tensor2D; attnWeights: Tensor2D }>()
+  private cache = new Map<LayerCacheKey, { input: Tensor2D; q: Tensor2D; k: Tensor2D; v: Tensor2D; attnWeights: Tensor2D }>()
   private lastCache: { input: Tensor2D; q: Tensor2D; k: Tensor2D; v: Tensor2D; attnWeights: Tensor2D } | null = null
   optimizerWQ: Adam
   optimizerWK: Adam
@@ -42,7 +42,7 @@ export class SelfAttention implements SyncModelLayer {
     this.optimizerWV = Adam.make(embeddingDim, embeddingDim)
   }
 
-  private fiberKey(fiberId: FiberId.FiberId): number | string {
+  private fiberKey(fiberId: FiberId.FiberId): LayerCacheKey {
     return FiberId.isRuntime(fiberId) ? fiberId.id : JSON.stringify(fiberId)
   }
 
