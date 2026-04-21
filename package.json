@@ -20,6 +20,9 @@
     "build": "tsc",
     "check": "tsc --noEmit",
     "dev": "bun --tsconfig-override tsconfig.dev.json src/cli/main.ts",
+    "bench": "bun benchmarks/harness.ts",
+    "bench:training": "bun benchmarks/training-runtime.ts",
+    "check:bench": "tsc --noEmit -p tsconfig.bench.json",
     "test": "bun test",
     "test:watch": "bun test --watch",
     "test:unit": "bun test tests/ts"

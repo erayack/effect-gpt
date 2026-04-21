@@ -66,17 +66,23 @@ export const crossEntropyLossAndDLogits = (
   }
 }
 
-export const crossEntropyLossAndDLogitsFromLogits = (
+export const crossEntropyLossAndDLogitsFromLogitsInto = (
   logits: Tensor2D,
-  targetIds: ArrayLike<number>
-): { loss: number; grads: Tensor2D } => {
+  targetIds: ArrayLike<number>,
+  gradsOut: Tensor2D
+): number => {
   if (logits.rows !== targetIds.length) {
     throw new Ops.ShapeError(
-      `crossEntropyLossAndDLogitsFromLogits: logits.rows (${logits.rows}) !== targetIds.length (${targetIds.length})`
+      `crossEntropyLossAndDLogitsFromLogitsInto: logits.rows (${logits.rows}) !== targetIds.length (${targetIds.length})`
+    )
+  }
+  if (gradsOut.rows !== logits.rows || gradsOut.cols !== logits.cols) {
+    throw new Ops.ShapeError(
+      `crossEntropyLossAndDLogitsFromLogitsInto: gradsOut shape (${gradsOut.rows},${gradsOut.cols}) !== logits shape (${logits.rows},${logits.cols})`
     )
   }
 
-  const data = new Float32Array(logits.data.length)
+  const data = gradsOut.data
   const cols = logits.cols
   let loss = 0
 
@@ -114,8 +120,14 @@ export const crossEntropyLossAndDLogitsFromLogits = (
     data[i] *= scale
   }
 
-  return {
-    loss: loss / targetIds.length,
-    grads: T.make(logits.rows, logits.cols, data)
-  }
+  return loss / targetIds.length
+}
+
+export const crossEntropyLossAndDLogitsFromLogits = (
+  logits: Tensor2D,
+  targetIds: ArrayLike<number>
+): { loss: number; grads: Tensor2D } => {
+  const grads = T.zeros(logits.rows, logits.cols)
+  const loss = crossEntropyLossAndDLogitsFromLogitsInto(logits, targetIds, grads)
+  return { loss, grads }
 }

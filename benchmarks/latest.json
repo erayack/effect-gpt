@@ -1,0 +1,351 @@
+{
+  "generatedAt": "2026-04-21T16:25:13.026Z",
+  "iterations": 5,
+  "warmup": 1,
+  "scenarios": [
+    {
+      "name": "train-small",
+      "description": "End-to-end minibatch training throughput on the benchmark corpus.",
+      "metadata": {
+        "corpus_examples": 128,
+        "epochs": 2,
+        "batch_size": 4,
+        "transformer_blocks": 2,
+        "trainable_tokens_per_run": 3264
+      },
+      "runs": [
+        {
+          "durationMs": 906.556458,
+          "metrics": {
+            "duration_ms": 906.556458,
+            "epoch_ms": 451,
+            "final_loss": 0.5328866850702189,
+            "trainable_tokens": 3264,
+            "trainable_tokens_per_sec": 3600.437646432827
+          }
+        },
+        {
+          "durationMs": 942.8270420000003,
+          "metrics": {
+            "duration_ms": 942.8270420000003,
+            "epoch_ms": 469.5,
+            "final_loss": 0.5328866850702189,
+            "trainable_tokens": 3264,
+            "trainable_tokens_per_sec": 3461.9287044166035
+          }
+        },
+        {
+          "durationMs": 895.826,
+          "metrics": {
+            "duration_ms": 895.826,
+            "epoch_ms": 446,
+            "final_loss": 0.5328866850702189,
+            "trainable_tokens": 3264,
+            "trainable_tokens_per_sec": 3643.5647101111153
+          }
+        },
+        {
+          "durationMs": 891.2700829999994,
+          "metrics": {
+            "duration_ms": 891.2700829999994,
+            "epoch_ms": 444,
+            "final_loss": 0.5328866850702189,
+            "trainable_tokens": 3264,
+            "trainable_tokens_per_sec": 3662.189567738472
+          }
+        },
+        {
+          "durationMs": 911.1556249999994,
+          "metrics": {
+            "duration_ms": 911.1556249999994,
+            "epoch_ms": 453.5,
+            "final_loss": 0.5328866850702189,
+            "trainable_tokens": 3264,
+            "trainable_tokens_per_sec": 3582.264006766135
+          }
+        }
+      ],
+      "metrics": {
+        "duration_ms": {
+          "min": 891.2700829999994,
+          "max": 942.8270420000003,
+          "mean": 909.5270416,
+          "median": 906.556458,
+          "p95": 942.8270420000003
+        },
+        "epoch_ms": {
+          "min": 444,
+          "max": 469.5,
+          "mean": 452.8,
+          "median": 451,
+          "p95": 469.5
+        },
+        "final_loss": {
+          "min": 0.5328866850702189,
+          "max": 0.5328866850702189,
+          "mean": 0.5328866850702189,
+          "median": 0.5328866850702189,
+          "p95": 0.5328866850702189
+        },
+        "trainable_tokens": {
+          "min": 3264,
+          "max": 3264,
+          "mean": 3264,
+          "median": 3264,
+          "p95": 3264
+        },
+        "trainable_tokens_per_sec": {
+          "min": 3461.9287044166035,
+          "max": 3662.189567738472,
+          "mean": 3590.07692709303,
+          "median": 3600.437646432827,
+          "p95": 3662.189567738472
+        }
+      }
+    },
+    {
+      "name": "generate-short",
+      "description": "Greedy generation from a short prompt to track decode throughput.",
+      "metadata": {
+        "prompt_tokens": 5,
+        "transformer_blocks": 2,
+        "max_seq_len": 80
+      },
+      "runs": [
+        {
+          "durationMs": 16.175457999999708,
+          "metrics": {
+            "duration_ms": 16.175457999999708,
+            "prompt_tokens": 5,
+            "generated_tokens": 75,
+            "total_tokens": 80,
+            "generated_tokens_per_sec": 4636.653874035675,
+            "total_tokens_per_sec": 4945.764132304721,
+            "ms_per_generated_token": 0.21567277333332943
+          }
+        },
+        {
+          "durationMs": 15.075708000000304,
+          "metrics": {
+            "duration_ms": 15.075708000000304,
+            "prompt_tokens": 5,
+            "generated_tokens": 75,
+            "total_tokens": 80,
+            "generated_tokens_per_sec": 4974.890731499872,
+            "total_tokens_per_sec": 5306.550113599864,
+            "ms_per_generated_token": 0.20100944000000406
+          }
+        },
+        {
+          "durationMs": 14.79583300000013,
+          "metrics": {
+            "duration_ms": 14.79583300000013,
+            "prompt_tokens": 5,
+            "generated_tokens": 75,
+            "total_tokens": 80,
+            "generated_tokens_per_sec": 5068.994763593191,
+            "total_tokens_per_sec": 5406.927747832738,
+            "ms_per_generated_token": 0.19727777333333507
+          }
+        },
+        {
+          "durationMs": 15.448166999999557,
+          "metrics": {
+            "duration_ms": 15.448166999999557,
+            "prompt_tokens": 5,
+            "generated_tokens": 75,
+            "total_tokens": 80,
+            "generated_tokens_per_sec": 4854.944926475882,
+            "total_tokens_per_sec": 5178.607921574274,
+            "ms_per_generated_token": 0.2059755599999941
+          }
+        },
+        {
+          "durationMs": 15.503915999999663,
+          "metrics": {
+            "duration_ms": 15.503915999999663,
+            "prompt_tokens": 5,
+            "generated_tokens": 75,
+            "total_tokens": 80,
+            "generated_tokens_per_sec": 4837.487509607356,
+            "total_tokens_per_sec": 5159.986676914513,
+            "ms_per_generated_token": 0.2067188799999955
+          }
+        }
+      ],
+      "metrics": {
+        "duration_ms": {
+          "min": 14.79583300000013,
+          "max": 16.175457999999708,
+          "mean": 15.399816399999873,
+          "median": 15.448166999999557,
+          "p95": 16.175457999999708
+        },
+        "prompt_tokens": {
+          "min": 5,
+          "max": 5,
+          "mean": 5,
+          "median": 5,
+          "p95": 5
+        },
+        "generated_tokens": {
+          "min": 75,
+          "max": 75,
+          "mean": 75,
+          "median": 75,
+          "p95": 75
+        },
+        "total_tokens": {
+          "min": 80,
+          "max": 80,
+          "mean": 80,
+          "median": 80,
+          "p95": 80
+        },
+        "generated_tokens_per_sec": {
+          "min": 4636.653874035675,
+          "max": 5068.994763593191,
+          "mean": 4874.594361042395,
+          "median": 4854.944926475882,
+          "p95": 5068.994763593191
+        },
+        "total_tokens_per_sec": {
+          "min": 4945.764132304721,
+          "max": 5406.927747832738,
+          "mean": 5199.567318445223,
+          "median": 5178.607921574274,
+          "p95": 5406.927747832738
+        },
+        "ms_per_generated_token": {
+          "min": 0.19727777333333507,
+          "max": 0.21567277333332943,
+          "mean": 0.20533088533333163,
+          "median": 0.2059755599999941,
+          "p95": 0.21567277333332943
+        }
+      }
+    },
+    {
+      "name": "generate-long",
+      "description": "Greedy generation from a longer prompt to expose prefill plus decode cost.",
+      "metadata": {
+        "prompt_tokens": 76,
+        "transformer_blocks": 2,
+        "max_seq_len": 80
+      },
+      "runs": [
+        {
+          "durationMs": 9.205500000000029,
+          "metrics": {
+            "duration_ms": 9.205500000000029,
+            "prompt_tokens": 76,
+            "generated_tokens": 4,
+            "total_tokens": 80,
+            "generated_tokens_per_sec": 434.5228396067555,
+            "total_tokens_per_sec": 8690.456792135108,
+            "ms_per_generated_token": 2.3013750000000073
+          }
+        },
+        {
+          "durationMs": 8.152250000000095,
+          "metrics": {
+            "duration_ms": 8.152250000000095,
+            "prompt_tokens": 76,
+            "generated_tokens": 4,
+            "total_tokens": 80,
+            "generated_tokens_per_sec": 490.6620871538475,
+            "total_tokens_per_sec": 9813.241743076951,
+            "ms_per_generated_token": 2.0380625000000236
+          }
+        },
+        {
+          "durationMs": 9.745916999999281,
+          "metrics": {
+            "duration_ms": 9.745916999999281,
+            "prompt_tokens": 76,
+            "generated_tokens": 4,
+            "total_tokens": 80,
+            "generated_tokens_per_sec": 410.42828499363327,
+            "total_tokens_per_sec": 8208.565699872664,
+            "ms_per_generated_token": 2.4364792499998202
+          }
+        },
+        {
+          "durationMs": 8.35070799999994,
+          "metrics": {
+            "duration_ms": 8.35070799999994,
+            "prompt_tokens": 76,
+            "generated_tokens": 4,
+            "total_tokens": 80,
+            "generated_tokens_per_sec": 479.00130144653946,
+            "total_tokens_per_sec": 9580.026028930788,
+            "ms_per_generated_token": 2.087676999999985
+          }
+        },
+        {
+          "durationMs": 8.664041999999426,
+          "metrics": {
+            "duration_ms": 8.664041999999426,
+            "prompt_tokens": 76,
+            "generated_tokens": 4,
+            "total_tokens": 80,
+            "generated_tokens_per_sec": 461.6782790296105,
+            "total_tokens_per_sec": 9233.56558059221,
+            "ms_per_generated_token": 2.1660104999998566
+          }
+        }
+      ],
+      "metrics": {
+        "duration_ms": {
+          "min": 8.152250000000095,
+          "max": 9.745916999999281,
+          "mean": 8.823683399999755,
+          "median": 8.664041999999426,
+          "p95": 9.745916999999281
+        },
+        "prompt_tokens": {
+          "min": 76,
+          "max": 76,
+          "mean": 76,
+          "median": 76,
+          "p95": 76
+        },
+        "generated_tokens": {
+          "min": 4,
+          "max": 4,
+          "mean": 4,
+          "median": 4,
+          "p95": 4
+        },
+        "total_tokens": {
+          "min": 80,
+          "max": 80,
+          "mean": 80,
+          "median": 80,
+          "p95": 80
+        },
+        "generated_tokens_per_sec": {
+          "min": 410.42828499363327,
+          "max": 490.6620871538475,
+          "mean": 455.25855844607725,
+          "median": 461.6782790296105,
+          "p95": 490.6620871538475
+        },
+        "total_tokens_per_sec": {
+          "min": 8208.565699872664,
+          "max": 9813.241743076951,
+          "mean": 9105.171168921544,
+          "median": 9233.56558059221,
+          "p95": 9813.241743076951
+        },
+        "ms_per_generated_token": {
+          "min": 2.0380625000000236,
+          "max": 2.4364792499998202,
+          "mean": 2.2059208499999388,
+          "median": 2.1660104999998566,
+          "p95": 2.4364792499998202
+        }
+      }
+    }
+  ]
+}
