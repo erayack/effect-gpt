@@ -10,13 +10,24 @@ import { Adam } from "../training/Adam"
 import type { Rng } from "../tensor/random"
 import { TensorWorkspace } from "../tensor/Workspace"
 
+export interface EmbeddingsInferenceState {
+  readonly workspace: TensorWorkspace
+}
+
+interface EmbeddingsCacheEntry {
+  readonly workspace: TensorWorkspace
+  readonly tokenIds: Int32Array
+  readonly positionIds: Int32Array
+}
+
 export class Embeddings implements SyncModelLayer {
   readonly _tag = "Embeddings"
   tokenEmbeddings: Tensor2D
   positionalEmbeddings: Tensor2D
 
-  private cache = new Map<LayerCacheKey, { tokenIds: Int32Array; positionIds: Int32Array }>()
-  private lastCache: { tokenIds: Int32Array; positionIds: Int32Array } | null = null
+  private cache = new Map<LayerCacheKey, EmbeddingsCacheEntry>()
+  private lastCache: EmbeddingsCacheEntry | null = null
+  private readonly workspacePool: Array<TensorWorkspace> = []
   tokenOptimizer: Adam
   positionalOptimizer: Adam
 
@@ -35,18 +46,36 @@ export class Embeddings implements SyncModelLayer {
     return this.tokenEmbeddings.data.length + this.positionalEmbeddings.data.length
   }
 
-  private storeCache(cacheKey: LayerCacheKey | undefined, tokenIds: Int32Array, positionIds: Int32Array): void {
-    if (cacheKey !== undefined) {
-      this.cache.set(cacheKey, { tokenIds, positionIds })
+  private acquireWorkspace(): TensorWorkspace {
+    return this.workspacePool.pop() ?? new TensorWorkspace()
+  }
+
+  private releaseWorkspace(workspace: TensorWorkspace): void {
+    this.workspacePool.push(workspace)
+  }
+
+  private storeCache(
+    cacheKey: LayerCacheKey | undefined,
+    workspace: TensorWorkspace,
+    tokenIds: Int32Array,
+    positionIds: Int32Array
+  ): void {
+    if (cacheKey !== undefined && this.cache.has(cacheKey)) {
+      throw new Ops.ShapeError("Embeddings.forward received a cacheKey that is already active")
     }
-    this.lastCache = { tokenIds, positionIds }
+    const entry = { workspace, tokenIds, positionIds }
+    if (cacheKey !== undefined) {
+      this.cache.set(cacheKey, entry)
+    }
+    this.lastCache = entry
   }
 
   // Inference-only embedding lookup that does not touch the training cache.
   // Used by KV-cache prefill/decode in LLM.forwardIncremental.
   private embedTokenIdsSync(
     tokenIds: ReadonlyArray<number>,
-    startPosition: number
+    startPosition: number,
+    state?: EmbeddingsInferenceState
   ): Tensor2D {
     const seqLen = tokenIds.length
     const endPosition = startPosition + seqLen
@@ -54,10 +83,10 @@ export class Embeddings implements SyncModelLayer {
       throw new Ops.ShapeError(`Sequence length ${endPosition} exceeds maximum ${this.positionalEmbeddings.rows}`)
     }
 
-    const workspace = new TensorWorkspace()
+    const workspace = state?.workspace ?? new TensorWorkspace()
     const tokenEmbeds = workspace.borrowTensor("tokenEmbeds", tokenIds.length, this.tokenEmbeddings.cols)
     const posEmbeds = workspace.borrowTensor("posEmbeds", tokenIds.length, this.positionalEmbeddings.cols)
-    const combined = T.zeros(tokenIds.length, this.tokenEmbeddings.cols)
+    const combined = workspace.borrowTensor("combined", tokenIds.length, this.tokenEmbeddings.cols)
 
     Ops.gatherRowsIntoSync(this.tokenEmbeddings, tokenIds, tokenEmbeds)
     Ops.sliceRowsIntoSync(this.positionalEmbeddings, startPosition, endPosition, posEmbeds)
@@ -65,16 +94,16 @@ export class Embeddings implements SyncModelLayer {
     return combined
   }
 
-  forwardTokensSync(tokenIds: ReadonlyArray<number>): Tensor2D {
-    return this.embedTokenIdsSync(tokenIds, 0)
+  forwardTokensSync(tokenIds: ReadonlyArray<number>, state?: EmbeddingsInferenceState): Tensor2D {
+    return this.embedTokenIdsSync(tokenIds, 0, state)
   }
 
   forwardTokens(tokenIds: ReadonlyArray<number>): Effect.Effect<Tensor2D, ShapeError> {
     return Ops.syncShapeEffect(() => this.forwardTokensSync(tokenIds))
   }
 
-  forwardTokenSync(tokenId: number, position: number): Tensor2D {
-    return this.embedTokenIdsSync([tokenId], position)
+  forwardTokenSync(tokenId: number, position: number, state?: EmbeddingsInferenceState): Tensor2D {
+    return this.embedTokenIdsSync([tokenId], position, state)
   }
 
   forwardToken(tokenId: number, position: number): Effect.Effect<Tensor2D, ShapeError> {
@@ -102,23 +131,32 @@ export class Embeddings implements SyncModelLayer {
       ? new Int32Array(layout.positionIds)
       : Int32Array.from({ length: seqLen }, (_, i) => i)
 
-    if (context?.captureCache !== false) {
-      this.storeCache(context?.cacheKey, tokenIds, positionIds)
-    }
+    const captureCache = context?.captureCache !== false
+    const workspace = captureCache ? this.acquireWorkspace() : new TensorWorkspace()
+    let stored = false
+    try {
+      const tokenEmbeds = workspace.borrowTensor("tokenEmbeds", seqLen, this.tokenEmbeddings.cols)
+      const posEmbeds = workspace.borrowTensor("posEmbeds", seqLen, this.positionalEmbeddings.cols)
+      const combined = workspace.borrowTensor("combined", seqLen, this.tokenEmbeddings.cols)
 
-    const workspace = new TensorWorkspace()
-    const tokenEmbeds = workspace.borrowTensor("tokenEmbeds", seqLen, this.tokenEmbeddings.cols)
-    const posEmbeds = workspace.borrowTensor("posEmbeds", seqLen, this.positionalEmbeddings.cols)
-    const combined = T.zeros(seqLen, this.tokenEmbeddings.cols)
-
-    Ops.gatherRowsIntoSync(this.tokenEmbeddings, tokenIds, tokenEmbeds)
-    if (layout) {
-      Ops.gatherRowsIntoSync(this.positionalEmbeddings, positionIds, posEmbeds)
-    } else {
-      Ops.sliceRowsIntoSync(this.positionalEmbeddings, 0, seqLen, posEmbeds)
+      Ops.gatherRowsIntoSync(this.tokenEmbeddings, tokenIds, tokenEmbeds)
+      if (layout) {
+        Ops.gatherRowsIntoSync(this.positionalEmbeddings, positionIds, posEmbeds)
+      } else {
+        Ops.sliceRowsIntoSync(this.positionalEmbeddings, 0, seqLen, posEmbeds)
+      }
+      Ops.addIntoSync(tokenEmbeds, posEmbeds, combined)
+      if (captureCache) {
+        this.storeCache(context?.cacheKey, workspace, tokenIds, positionIds)
+        stored = true
+      }
+      return combined
+    } catch (error) {
+      if (captureCache && !stored) {
+        this.releaseWorkspace(workspace)
+      }
+      throw error
     }
-    Ops.addIntoSync(tokenEmbeds, posEmbeds, combined)
-    return combined
   }
 
   forward(input: Tensor2D, context?: LayerForwardContext): Effect.Effect<Tensor2D, ShapeError> {
@@ -144,55 +182,59 @@ export class Embeddings implements SyncModelLayer {
     }
     this.lastCache = null
 
-    const { tokenIds, positionIds } = cached
-    const cols = dOut.cols
+    const { workspace, tokenIds, positionIds } = cached
+    try {
+      const cols = dOut.cols
 
-    const tokenRowToGradIndex = new Map<number, number>()
-    const tokenRows: Array<number> = []
-    const positionRowToGradIndex = new Map<number, number>()
-    const positionRows: Array<number> = []
+      const tokenRowToGradIndex = new Map<number, number>()
+      const tokenRows: Array<number> = []
+      const positionRowToGradIndex = new Map<number, number>()
+      const positionRows: Array<number> = []
 
-    for (let i = 0; i < tokenIds.length; i++) {
-      const tokenId = tokenIds[i]
-      if (tokenId < 0 || tokenId >= this.tokenEmbeddings.rows) {
-        throw new Ops.ShapeError(`Token ID ${tokenId} out of bounds for vocab size ${this.tokenEmbeddings.rows}`)
+      for (let i = 0; i < tokenIds.length; i++) {
+        const tokenId = tokenIds[i]
+        if (tokenId < 0 || tokenId >= this.tokenEmbeddings.rows) {
+          throw new Ops.ShapeError(`Token ID ${tokenId} out of bounds for vocab size ${this.tokenEmbeddings.rows}`)
+        }
+        const positionId = positionIds[i]!
+        if (positionId < 0 || positionId >= this.positionalEmbeddings.rows) {
+          throw new Ops.ShapeError(
+            `Position ID ${positionId} out of bounds for max sequence length ${this.positionalEmbeddings.rows}`
+          )
+        }
+        if (!tokenRowToGradIndex.has(tokenId)) {
+          tokenRowToGradIndex.set(tokenId, tokenRows.length)
+          tokenRows.push(tokenId)
+        }
+        if (!positionRowToGradIndex.has(positionId)) {
+          positionRowToGradIndex.set(positionId, positionRows.length)
+          positionRows.push(positionId)
+        }
       }
-      const positionId = positionIds[i]!
-      if (positionId < 0 || positionId >= this.positionalEmbeddings.rows) {
-        throw new Ops.ShapeError(
-          `Position ID ${positionId} out of bounds for max sequence length ${this.positionalEmbeddings.rows}`
-        )
+
+      const tokenGradRows = new Float32Array(tokenRows.length * cols)
+      const positionGradRows = new Float32Array(positionRows.length * cols)
+
+      for (let i = 0; i < tokenIds.length; i++) {
+        const tokenGradRow = tokenRowToGradIndex.get(tokenIds[i])!
+        const positionGradRow = positionRowToGradIndex.get(positionIds[i]!)!
+        const rowOffset = i * cols
+        const tokenOffset = tokenGradRow * cols
+        const positionOffset = positionGradRow * cols
+        for (let j = 0; j < cols; j++) {
+          const grad = dOut.data[rowOffset + j]
+          tokenGradRows[tokenOffset + j] += grad
+          positionGradRows[positionOffset + j] += grad
+        }
       }
-      if (!tokenRowToGradIndex.has(tokenId)) {
-        tokenRowToGradIndex.set(tokenId, tokenRows.length)
-        tokenRows.push(tokenId)
-      }
-      if (!positionRowToGradIndex.has(positionId)) {
-        positionRowToGradIndex.set(positionId, positionRows.length)
-        positionRows.push(positionId)
-      }
+
+      this.tokenOptimizer.stepRows(this.tokenEmbeddings, tokenRows, tokenGradRows, lr)
+      this.positionalOptimizer.stepRows(this.positionalEmbeddings, positionRows, positionGradRows, lr)
+
+      return dOut
+    } finally {
+      this.releaseWorkspace(workspace)
     }
-
-    const tokenGradRows = new Float32Array(tokenRows.length * cols)
-    const positionGradRows = new Float32Array(positionRows.length * cols)
-
-    for (let i = 0; i < tokenIds.length; i++) {
-      const tokenGradRow = tokenRowToGradIndex.get(tokenIds[i])!
-      const positionGradRow = positionRowToGradIndex.get(positionIds[i]!)!
-      const rowOffset = i * cols
-      const tokenOffset = tokenGradRow * cols
-      const positionOffset = positionGradRow * cols
-      for (let j = 0; j < cols; j++) {
-        const grad = dOut.data[rowOffset + j]
-        tokenGradRows[tokenOffset + j] += grad
-        positionGradRows[positionOffset + j] += grad
-      }
-    }
-
-    this.tokenOptimizer.stepRows(this.tokenEmbeddings, tokenRows, tokenGradRows, lr)
-    this.positionalOptimizer.stepRows(this.positionalEmbeddings, positionRows, positionGradRows, lr)
-
-    return dOut
   }
 
   backward(dOut: Tensor2D, lr: number): Effect.Effect<Tensor2D, ShapeError> {

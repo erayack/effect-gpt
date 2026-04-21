@@ -83,6 +83,21 @@ describe("OutputProjection", () => {
     }
   })
 
+  test("backward returns a stable gradient tensor after later calls reuse workspaces", () => {
+    const proj = makeOutputProjection(vocabSize)
+
+    runEffect(proj.forward(T.ones(2, EMBEDDING_DIM)))
+    const firstGrad = runEffect(proj.backward(T.ones(2, vocabSize), 0.01))
+    const firstGradBefore = T.clone(firstGrad)
+
+    runEffect(proj.forward(T.ones(4, EMBEDDING_DIM)))
+    runEffect(proj.backward(T.ones(4, vocabSize), 0.01))
+
+    for (let i = 0; i < firstGrad.data.length; i++) {
+      expect(firstGrad.data[i]).toBe(firstGradBefore.data[i])
+    }
+  })
+
   test("parametersCount", () => {
     const proj = makeOutputProjection(vocabSize)
     const expected = EMBEDDING_DIM * vocabSize + vocabSize

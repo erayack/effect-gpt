@@ -2,19 +2,19 @@ import type { Tensor2D } from "./Tensor2D"
 import * as T from "./Tensor2D"
 
 export class TensorWorkspace {
-  private readonly tensors = new Map<string, Tensor2D>()
+  private readonly tensors = new Map<string, Float32Array>()
   private readonly vectors = new Map<string, Float32Array>()
 
   borrowTensor(name: string, rows: number, cols: number): Tensor2D {
     const length = rows * cols
     const existing = this.tensors.get(name)
-    if (existing && existing.rows === rows && existing.cols === cols) {
-      return existing
+    if (existing && existing.length >= length) {
+      return T.make(rows, cols, existing.subarray(0, length))
     }
 
-    const next = T.make(rows, cols, new Float32Array(length))
+    const next = new Float32Array(length)
     this.tensors.set(name, next)
-    return next
+    return T.make(rows, cols, next)
   }
 
   borrowVector(name: string, length: number): Float32Array {

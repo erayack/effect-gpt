@@ -9,9 +9,16 @@ import { FeedForward } from "./FeedForward"
 import { LayerNorm } from "./LayerNorm"
 import { EMBEDDING_DIM, HIDDEN_DIM } from "../config"
 import type { Rng } from "../tensor/random"
+import { TensorWorkspace } from "../tensor/Workspace"
 
 export interface TransformerBlockDecodeState {
   readonly attention: SelfAttentionKvCache
+  readonly workspaces: {
+    readonly attention: TensorWorkspace
+    readonly norm1: TensorWorkspace
+    readonly feedForward: TensorWorkspace
+    readonly norm2: TensorWorkspace
+  }
 }
 
 export class TransformerBlock implements SyncModelLayer {
@@ -63,15 +70,21 @@ export class TransformerBlock implements SyncModelLayer {
 
   createDecodeState(capacity: number): TransformerBlockDecodeState {
     return {
-      attention: this.attention.createKvCache(capacity)
+      attention: this.attention.createKvCache(capacity),
+      workspaces: {
+        attention: new TensorWorkspace(),
+        norm1: new TensorWorkspace(),
+        feedForward: new TensorWorkspace(),
+        norm2: new TensorWorkspace()
+      }
     }
   }
 
   prefillSync(input: Tensor2D, state: TransformerBlockDecodeState): Tensor2D {
-    const attentionOut = this.attention.prefillSync(input, state.attention)
-    const norm1Out = this.norm1.forwardInferenceSync(attentionOut)
-    const ffnOut = this.feedForward.forwardInferenceSync(norm1Out)
-    return this.norm2.forwardInferenceSync(ffnOut)
+    const attentionOut = this.attention.prefillSync(input, state.attention, state.workspaces.attention)
+    const norm1Out = this.norm1.forwardInferenceSync(attentionOut, { workspace: state.workspaces.norm1 })
+    const ffnOut = this.feedForward.forwardInferenceSync(norm1Out, { workspace: state.workspaces.feedForward })
+    return this.norm2.forwardInferenceSync(ffnOut, { workspace: state.workspaces.norm2 })
   }
 
   prefill(input: Tensor2D, state: TransformerBlockDecodeState): Effect.Effect<Tensor2D, ShapeError> {
@@ -79,10 +92,10 @@ export class TransformerBlock implements SyncModelLayer {
   }
 
   decodeStepSync(input: Tensor2D, state: TransformerBlockDecodeState): Tensor2D {
-    const attentionOut = this.attention.decodeStepSync(input, state.attention)
-    const norm1Out = this.norm1.forwardInferenceSync(attentionOut)
-    const ffnOut = this.feedForward.forwardInferenceSync(norm1Out)
-    return this.norm2.forwardInferenceSync(ffnOut)
+    const attentionOut = this.attention.decodeStepSync(input, state.attention, state.workspaces.attention)
+    const norm1Out = this.norm1.forwardInferenceSync(attentionOut, { workspace: state.workspaces.norm1 })
+    const ffnOut = this.feedForward.forwardInferenceSync(norm1Out, { workspace: state.workspaces.feedForward })
+    return this.norm2.forwardInferenceSync(ffnOut, { workspace: state.workspaces.norm2 })
   }
 
   decodeStep(input: Tensor2D, state: TransformerBlockDecodeState): Effect.Effect<Tensor2D, ShapeError> {

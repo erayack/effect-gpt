@@ -76,6 +76,29 @@ describe("buffered tensor ops", () => {
     expectClose(actual, T.fromArray(2, 2, [50, 68, 122, 167]))
   })
 
+  test("TensorWorkspace reuses backing storage for smaller tensor views", () => {
+    const workspace = new TensorWorkspace()
+
+    const large = workspace.borrowTensor("buffer", 4, 4)
+    large.data.fill(1)
+    const small = workspace.borrowTensor("buffer", 2, 2)
+
+    expect(small.data.buffer).toBe(large.data.buffer)
+    expect(small.rows).toBe(2)
+    expect(small.cols).toBe(2)
+  })
+
+  test("TensorWorkspace grows once and reuses the larger backing storage", () => {
+    const workspace = new TensorWorkspace()
+
+    const small = workspace.borrowTensor("buffer", 2, 2)
+    const grown = workspace.borrowTensor("buffer", 4, 4)
+    const reused = workspace.borrowTensor("buffer", 3, 3)
+
+    expect(grown.data.buffer).not.toBe(small.data.buffer)
+    expect(reused.data.buffer).toBe(grown.data.buffer)
+  })
+
   test("matMulInto supports transposeA and transposeB together", () => {
     const a = T.fromArray(3, 2, [1, 2, 3, 4, 5, 6])
     const b = T.fromArray(2, 3, [7, 8, 9, 10, 11, 12])

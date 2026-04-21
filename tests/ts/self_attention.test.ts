@@ -6,6 +6,7 @@ import * as T from "../../src/tensor/Tensor2D"
 import * as Ops from "../../src/tensor/ops"
 import { EMBEDDING_DIM } from "../../src/config"
 import type { SequenceLayout } from "../../src/model/ModelLayer"
+import { TensorWorkspace } from "../../src/tensor/Workspace"
 
 describe("SelfAttention", () => {
   test("forward shape matches input", () => {
@@ -51,6 +52,21 @@ describe("SelfAttention", () => {
     runEffect(attention.backward(gradOut, 0.01))
 
     expectNotClose(attention.wQKV, wQKVBefore)
+  })
+
+  test("backward returns a stable gradient tensor after later calls reuse workspaces", () => {
+    const attention = makeSelfAttention()
+
+    runEffect(attention.forward(T.ones(2, EMBEDDING_DIM)))
+    const firstGrad = runEffect(attention.backward(T.ones(2, EMBEDDING_DIM), 0.01))
+    const firstGradBefore = T.clone(firstGrad)
+
+    runEffect(attention.forward(T.ones(4, EMBEDDING_DIM)))
+    runEffect(attention.backward(T.ones(4, EMBEDDING_DIM), 0.01))
+
+    for (let i = 0; i < firstGrad.data.length; i++) {
+      expect(firstGrad.data[i]).toBe(firstGradBefore.data[i])
+    }
   })
 
   test("batch layout prevents attention across flattened sequences", () => {
@@ -130,6 +146,31 @@ describe("SelfAttention", () => {
     const actual = runEffect(cacheAttention.decodeStep(next, cache))
 
     expectClose(actual, expectedLast)
+    expect(cache.length).toBe(4)
+  })
+
+  test("decodeStep reuses scratch buffers across repeated token steps", () => {
+    const attention = makeSelfAttention()
+    const prefix = T.ones(2, EMBEDDING_DIM)
+    const tokenA = T.fromArray(1, EMBEDDING_DIM, new Float32Array(EMBEDDING_DIM).fill(0.25))
+    const tokenBData = new Float32Array(EMBEDDING_DIM)
+    for (let i = 0; i < tokenBData.length; i++) {
+      tokenBData[i] = (i % 5) * 0.1 - 0.2
+    }
+    const tokenB = T.fromArray(1, EMBEDDING_DIM, tokenBData)
+
+    const cache = attention.createKvCache(8)
+    const workspace = new TensorWorkspace()
+    attention.prefillSync(prefix, cache, workspace)
+
+    const first = attention.decodeStepSync(tokenA, cache, workspace)
+    const second = attention.decodeStepSync(tokenB, cache, workspace)
+
+    expectShape(first, [1, EMBEDDING_DIM])
+    expectShape(second, [1, EMBEDDING_DIM])
+    expect(first.data.buffer).toBe(second.data.buffer)
+    expectFinite(first)
+    expectFinite(second)
     expect(cache.length).toBe(4)
   })
 

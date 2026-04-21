@@ -152,6 +152,19 @@ describe("LLM Predict", () => {
     expect(actual).toEqual(expected)
   })
 
+  test("incremental decoding can be run repeatedly without leaking scratch state", () => {
+    const llm = makeLLM({
+      vocabWords,
+      seed: CANONICAL_SEED,
+      numTransformerBlocks: 2
+    })
+
+    const first = runEffect(llm.forward("hello world"))
+    const second = runEffect(llm.forward("hello world"))
+
+    expect(second).toEqual(first)
+  })
+
   test("full recompute falls back for mixed sync/effect networks", () => {
     const stubOutput = new StubOutputProjection(vocabWords.length, eosTokenId, 2)
     const llm = makeLLMWithNetwork({

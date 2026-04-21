@@ -10,6 +10,16 @@ import { Adam } from "../training/Adam"
 import type { Rng } from "../tensor/random"
 import { TensorWorkspace } from "../tensor/Workspace"
 
+export interface FeedForwardInferenceState {
+  readonly workspace: TensorWorkspace
+}
+
+interface FeedForwardCacheEntry {
+  readonly workspace: TensorWorkspace
+  readonly input: Tensor2D
+  readonly hiddenPostActivation: Tensor2D
+}
+
 export class FeedForward implements SyncModelLayer {
   readonly _tag = "FeedForward"
   w1: Tensor2D
@@ -17,8 +27,9 @@ export class FeedForward implements SyncModelLayer {
   w2: Tensor2D
   b2: Tensor2D
 
-  private cache = new Map<LayerCacheKey, { input: Tensor2D; hiddenPostActivation: Tensor2D }>()
-  private lastCache: { input: Tensor2D; hiddenPostActivation: Tensor2D } | null = null
+  private cache = new Map<LayerCacheKey, FeedForwardCacheEntry>()
+  private lastCache: FeedForwardCacheEntry | null = null
+  private readonly workspacePool: Array<TensorWorkspace> = []
   optimizerW1: Adam
   optimizerB1: Adam
   optimizerW2: Adam
@@ -46,35 +57,65 @@ export class FeedForward implements SyncModelLayer {
     return this.w1.data.length + this.b1.data.length + this.w2.data.length + this.b2.data.length
   }
 
-  private storeCache(cacheKey: LayerCacheKey | undefined, input: Tensor2D, hiddenPostActivation: Tensor2D): void {
-    const cached = { input, hiddenPostActivation }
+  private acquireWorkspace(): TensorWorkspace {
+    return this.workspacePool.pop() ?? new TensorWorkspace()
+  }
+
+  private releaseWorkspace(workspace: TensorWorkspace): void {
+    this.workspacePool.push(workspace)
+  }
+
+  private storeCache(
+    cacheKey: LayerCacheKey | undefined,
+    workspace: TensorWorkspace,
+    input: Tensor2D,
+    hiddenPostActivation: Tensor2D
+  ): void {
+    if (cacheKey !== undefined && this.cache.has(cacheKey)) {
+      throw new Ops.ShapeError("FeedForward.forward received a cacheKey that is already active")
+    }
+    const cached = { workspace, input, hiddenPostActivation }
     if (cacheKey !== undefined) {
       this.cache.set(cacheKey, cached)
     }
     this.lastCache = cached
   }
 
-  private forwardCore(input: Tensor2D, captureCache: boolean, cacheKey?: LayerCacheKey): Tensor2D {
-    const workspace = new TensorWorkspace()
-    const hiddenPre = workspace.borrowTensor("hiddenPre", input.rows, this.w1.cols)
-    const hiddenPost = T.zeros(input.rows, this.w1.cols)
-    const outputPre = workspace.borrowTensor("outputPre", input.rows, this.w2.cols)
-    const output = T.zeros(input.rows, input.cols)
+  private forwardCore(
+    input: Tensor2D,
+    captureCache: boolean,
+    cacheKey?: LayerCacheKey,
+    state?: FeedForwardInferenceState
+  ): Tensor2D {
+    const workspace = captureCache ? this.acquireWorkspace() : state?.workspace ?? new TensorWorkspace()
+    let stored = false
+    try {
+      const hiddenPre = workspace.borrowTensor("hiddenPre", input.rows, this.w1.cols)
+      const hiddenPost = workspace.borrowTensor("hiddenPost", input.rows, this.w1.cols)
+      const outputPre = workspace.borrowTensor("outputPre", input.rows, this.w2.cols)
+      const output = workspace.borrowTensor("output", input.rows, input.cols)
 
-    Ops.matMulIntoSync(input, this.w1, hiddenPre, { workspace })
-    Ops.addRowBiasInPlaceSync(hiddenPre, this.b1)
-    Ops.reluInto(hiddenPre, hiddenPost)
-    if (captureCache) {
-      this.storeCache(cacheKey, input, hiddenPost)
+      Ops.matMulIntoSync(input, this.w1, hiddenPre, { workspace })
+      Ops.addRowBiasInPlaceSync(hiddenPre, this.b1)
+      Ops.reluInto(hiddenPre, hiddenPost)
+      Ops.matMulIntoSync(hiddenPost, this.w2, outputPre, { workspace })
+      Ops.addRowBiasInPlaceSync(outputPre, this.b2)
+      Ops.addIntoSync(outputPre, input, output)
+      if (captureCache) {
+        this.storeCache(cacheKey, workspace, input, hiddenPost)
+        stored = true
+      }
+      return output
+    } catch (error) {
+      if (captureCache && !stored) {
+        this.releaseWorkspace(workspace)
+      }
+      throw error
     }
-    Ops.matMulIntoSync(hiddenPost, this.w2, outputPre, { workspace })
-    Ops.addRowBiasInPlaceSync(outputPre, this.b2)
-    Ops.addIntoSync(outputPre, input, output)
-    return output
   }
 
-  forwardInferenceSync(input: Tensor2D): Tensor2D {
-    return this.forwardCore(input, false)
+  forwardInferenceSync(input: Tensor2D, state?: FeedForwardInferenceState): Tensor2D {
+    return this.forwardCore(input, false, undefined, state)
   }
 
   forwardInference(input: Tensor2D): Effect.Effect<Tensor2D, ShapeError> {
@@ -108,37 +149,42 @@ export class FeedForward implements SyncModelLayer {
     }
     this.lastCache = null
 
-    const { input, hiddenPostActivation } = cached
-    const workspace = new TensorWorkspace()
-    const gradW2 = T.zeros(hiddenPostActivation.cols, dOut.cols)
-    Ops.matMulIntoSync(hiddenPostActivation, dOut, gradW2, { transposeA: true, workspace })
-    const gradB2 = Ops.sumCols(dOut)
+    const { workspace, input, hiddenPostActivation } = cached
+    try {
+      const gradW2 = workspace.borrowTensor("gradW2", hiddenPostActivation.cols, dOut.cols)
+      Ops.matMulIntoSync(hiddenPostActivation, dOut, gradW2, { transposeA: true, workspace })
+      const gradB2 = workspace.borrowTensor("gradB2", 1, dOut.cols)
+      Ops.sumColsInto(dOut, gradB2)
 
-    const gradHiddenPost = workspace.borrowTensor("gradHiddenPost", dOut.rows, this.w2.rows)
-    Ops.matMulIntoSync(dOut, this.w2, gradHiddenPost, { transposeB: true, workspace })
+      const gradHiddenPost = workspace.borrowTensor("gradHiddenPost", dOut.rows, this.w2.rows)
+      Ops.matMulIntoSync(dOut, this.w2, gradHiddenPost, { transposeB: true, workspace })
 
-    const reluGrad = workspace.borrowTensor("reluGrad", hiddenPostActivation.rows, hiddenPostActivation.cols)
-    for (let i = 0; i < hiddenPostActivation.data.length; i++) {
-      reluGrad.data[i] = hiddenPostActivation.data[i] > 0 ? 1 : 0
+      const reluGrad = workspace.borrowTensor("reluGrad", hiddenPostActivation.rows, hiddenPostActivation.cols)
+      for (let i = 0; i < hiddenPostActivation.data.length; i++) {
+        reluGrad.data[i] = hiddenPostActivation.data[i] > 0 ? 1 : 0
+      }
+      const gradHiddenPre = workspace.borrowTensor("gradHiddenPre", gradHiddenPost.rows, gradHiddenPost.cols)
+      Ops.mulIntoSync(gradHiddenPost, reluGrad, gradHiddenPre)
+
+      const gradW1 = workspace.borrowTensor("gradW1", input.cols, gradHiddenPre.cols)
+      Ops.matMulIntoSync(input, gradHiddenPre, gradW1, { transposeA: true, workspace })
+      const gradB1 = workspace.borrowTensor("gradB1", 1, gradHiddenPre.cols)
+      Ops.sumColsInto(gradHiddenPre, gradB1)
+
+      const gradInputFF = workspace.borrowTensor("gradInputFF", gradHiddenPre.rows, this.w1.rows)
+      Ops.matMulIntoSync(gradHiddenPre, this.w1, gradInputFF, { transposeB: true, workspace })
+      const gradInput = T.zeros(gradInputFF.rows, gradInputFF.cols)
+      Ops.addIntoSync(gradInputFF, dOut, gradInput)
+
+      this.optimizerW2.step(this.w2, gradW2, lr)
+      this.optimizerB2.step(this.b2, gradB2, lr)
+      this.optimizerW1.step(this.w1, gradW1, lr)
+      this.optimizerB1.step(this.b1, gradB1, lr)
+
+      return gradInput
+    } finally {
+      this.releaseWorkspace(workspace)
     }
-    const gradHiddenPre = T.zeros(gradHiddenPost.rows, gradHiddenPost.cols)
-    Ops.mulIntoSync(gradHiddenPost, reluGrad, gradHiddenPre)
-
-    const gradW1 = T.zeros(input.cols, gradHiddenPre.cols)
-    Ops.matMulIntoSync(input, gradHiddenPre, gradW1, { transposeA: true, workspace })
-    const gradB1 = Ops.sumCols(gradHiddenPre)
-
-    const gradInputFF = workspace.borrowTensor("gradInputFF", gradHiddenPre.rows, this.w1.rows)
-    Ops.matMulIntoSync(gradHiddenPre, this.w1, gradInputFF, { transposeB: true, workspace })
-    const gradInput = T.zeros(gradInputFF.rows, gradInputFF.cols)
-    Ops.addIntoSync(gradInputFF, dOut, gradInput)
-
-    this.optimizerW2.step(this.w2, gradW2, lr)
-    this.optimizerB2.step(this.b2, gradB2, lr)
-    this.optimizerW1.step(this.w1, gradW1, lr)
-    this.optimizerB1.step(this.b1, gradB1, lr)
-
-    return gradInput
   }
 
   backward(dOut: Tensor2D, lr: number): Effect.Effect<Tensor2D, ShapeError> {

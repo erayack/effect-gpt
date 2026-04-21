@@ -12,6 +12,18 @@ Performance work in this repo should preserve the Effect-first architecture.
 
 ## Done
 
+- [x] **Hot layers now reuse grow-only workspaces and output buffers**
+  - Implemented in:
+    - [src/tensor/Workspace.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/Workspace.ts:1)
+    - [src/model/Embeddings.ts](/Users/erayack/Desktop/code/RustGPT/src/model/Embeddings.ts:1)
+    - [src/model/SelfAttention.ts](/Users/erayack/Desktop/code/RustGPT/src/model/SelfAttention.ts:1)
+    - [src/model/FeedForward.ts](/Users/erayack/Desktop/code/RustGPT/src/model/FeedForward.ts:1)
+    - [src/model/LayerNorm.ts](/Users/erayack/Desktop/code/RustGPT/src/model/LayerNorm.ts:1)
+    - [src/model/OutputProjection.ts](/Users/erayack/Desktop/code/RustGPT/src/model/OutputProjection.ts:1)
+    - [src/model/TransformerBlock.ts](/Users/erayack/Desktop/code/RustGPT/src/model/TransformerBlock.ts:1)
+    - [src/model/LLM.ts](/Users/erayack/Desktop/code/RustGPT/src/model/LLM.ts:1)
+  - `TensorWorkspace.borrowTensor()` now reuses grow-only backing buffers instead of exact-shape allocations, cache-bearing layer forwards retain pooled workspaces until the matching backward releases them, and incremental decode/prefill paths reuse per-generation scratch state instead of allocating fresh tensor/vector buffers every token.
+
 - [x] **Structural: Reduce Effect/runtime overhead inside math-heavy paths**
   - Implemented in:
     - [src/model/ModelLayer.ts](/Users/erayack/Desktop/code/RustGPT/src/model/ModelLayer.ts:1)

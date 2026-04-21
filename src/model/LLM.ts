@@ -5,13 +5,14 @@ import * as T from "../tensor/Tensor2D"
 import * as Ops from "../tensor/ops"
 import type { ShapeError } from "../tensor/ops"
 import { runForwardPass, type ModelLayer } from "./ModelLayer"
-import { Embeddings } from "./Embeddings"
+import { Embeddings, type EmbeddingsInferenceState } from "./Embeddings"
 import { TransformerBlock } from "./TransformerBlock"
-import { OutputProjection } from "./OutputProjection"
+import { OutputProjection, type OutputProjectionInferenceState } from "./OutputProjection"
 import { Vocab } from "../vocab/Vocab"
 import { tokenize } from "../tokenize/tokenize"
 import { MAX_SEQ_LEN, EMBEDDING_DIM, HIDDEN_DIM } from "../config"
 import type { Rng } from "../tensor/random"
+import { TensorWorkspace } from "../tensor/Workspace"
 
 interface IncrementalEmbeddings {
   forwardTokens(tokenIds: ReadonlyArray<number>): Effect.Effect<Tensor2D, ShapeError>
@@ -19,8 +20,8 @@ interface IncrementalEmbeddings {
 }
 
 interface SyncIncrementalEmbeddings extends IncrementalEmbeddings {
-  forwardTokensSync(tokenIds: ReadonlyArray<number>): Tensor2D
-  forwardTokenSync(tokenId: number, position: number): Tensor2D
+  forwardTokensSync(tokenIds: ReadonlyArray<number>, state?: EmbeddingsInferenceState): Tensor2D
+  forwardTokenSync(tokenId: number, position: number, state?: EmbeddingsInferenceState): Tensor2D
 }
 
 interface IncrementalTransformerBlock {
@@ -39,7 +40,7 @@ interface IncrementalOutputProjection {
 }
 
 interface SyncIncrementalOutputProjection extends IncrementalOutputProjection {
-  forwardInferenceSync(input: Tensor2D): Tensor2D
+  forwardInferenceSync(input: Tensor2D, state?: OutputProjectionInferenceState): Tensor2D
 }
 
 export class LLM {
@@ -266,14 +267,16 @@ export class LLM {
           SyncIncrementalOutputProjection
         const blocks = this.network.slice(1, -1) as unknown as ReadonlyArray<ModelLayer & SyncIncrementalTransformerBlock>
         const decodeStates = blocks.map((block) => block.createDecodeState(MAX_SEQ_LEN))
+        const embeddingsState: EmbeddingsInferenceState = { workspace: new TensorWorkspace() }
+        const outputProjectionState: OutputProjectionInferenceState = { workspace: new TensorWorkspace() }
 
-        let hidden = embeddings.forwardTokensSync(tokenized)
+        let hidden = embeddings.forwardTokensSync(tokenized, embeddingsState)
         for (let i = 0; i < blocks.length; i++) {
           hidden = blocks[i]!.prefillSync(hidden, decodeStates[i]!)
         }
 
         const lastHidden = Ops.rowAsMatrixSync(hidden, hidden.rows - 1)
-        let logits = outputProjection.forwardInferenceSync(lastHidden)
+        let logits = outputProjection.forwardInferenceSync(lastHidden, outputProjectionState)
 
         for (let step = 0; step < MAX_SEQ_LEN - inputLen; step++) {
           if (outputTokens.length >= MAX_SEQ_LEN - 1) {
@@ -288,11 +291,11 @@ export class LLM {
             break
           }
 
-          hidden = embeddings.forwardTokenSync(nextToken, tokenized.length - 1)
+          hidden = embeddings.forwardTokenSync(nextToken, tokenized.length - 1, embeddingsState)
           for (let i = 0; i < blocks.length; i++) {
             hidden = blocks[i]!.decodeStepSync(hidden, decodeStates[i]!)
           }
-          logits = outputProjection.forwardInferenceSync(hidden)
+          logits = outputProjection.forwardInferenceSync(hidden, outputProjectionState)
         }
 
         return outputTokens
