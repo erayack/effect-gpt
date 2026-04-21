@@ -43,6 +43,51 @@ const referenceMatMul = (
   return out
 }
 
+const referenceCausalAttention = (
+  q: T.Tensor2D,
+  k: T.Tensor2D,
+  v: T.Tensor2D,
+  layout?: { sequenceIds: Int32Array; positionIds: Int32Array; totalTokens: number }
+): { attended: T.Tensor2D; weights: T.Tensor2D } => {
+  const scores = referenceMatMul(q, k, { transposeB: true })
+  Ops.mulScalarInPlace(scores, 1 / Math.sqrt(q.cols))
+  Ops.maskCausalInPlace(scores, layout)
+  const weights = Ops.softmaxRows(scores)
+  const attended = referenceMatMul(weights, v)
+  return { attended, weights }
+}
+
+const referenceSdpaBackward = (
+  q: T.Tensor2D,
+  k: T.Tensor2D,
+  v: T.Tensor2D,
+  dOut: T.Tensor2D,
+  layout?: { sequenceIds: Int32Array; positionIds: Int32Array; totalTokens: number }
+): { dQ: T.Tensor2D; dK: T.Tensor2D; dV: T.Tensor2D } => {
+  const { weights } = referenceCausalAttention(q, k, v, layout)
+  const gradAttnWeights = referenceMatMul(dOut, v, { transposeB: true })
+  const dV = referenceMatMul(weights, dOut, { transposeA: true })
+  const gradScores = T.zeros(weights.rows, weights.cols)
+  const scale = 1 / Math.sqrt(q.cols)
+
+  for (let row = 0; row < weights.rows; row++) {
+    const rowOffset = row * weights.cols
+    let dot = 0
+    for (let col = 0; col < weights.cols; col++) {
+      dot += weights.data[rowOffset + col]! * gradAttnWeights.data[rowOffset + col]!
+    }
+    for (let col = 0; col < weights.cols; col++) {
+      const weight = weights.data[rowOffset + col]!
+      const gradWeight = gradAttnWeights.data[rowOffset + col]!
+      gradScores.data[rowOffset + col] = weight * (gradWeight - dot) * scale
+    }
+  }
+
+  const dQ = referenceMatMul(gradScores, k)
+  const dK = referenceMatMul(gradScores, q, { transposeA: true })
+  return { dQ, dK, dV }
+}
+
 describe("buffered tensor ops", () => {
   test("matMulInto matches allocating matMul", () => {
     const a = T.fromArray(2, 3, [1, 2, 3, 4, 5, 6])
@@ -167,6 +212,150 @@ describe("buffered tensor ops", () => {
       }
       expect(sum).toBeCloseTo(1, 6)
     }
+  })
+
+  test("fused scaled-dot-product attention matches composed causal path", () => {
+    const q = makePatternedTensor(4, 6, 9)
+    const k = makePatternedTensor(4, 6, 10)
+    const v = makePatternedTensor(4, 6, 11)
+    const workspace = new TensorWorkspace()
+    const actual = T.zeros(4, 6)
+    const actualWeights = T.zeros(4, 4)
+
+    const expected = referenceCausalAttention(q, k, v)
+
+    Ops.fusedScaledDotProductAttentionIntoSync(q, k, v, actual, {
+      causalMask: true,
+      weightsOut: actualWeights,
+      workspace
+    })
+
+    expectClose(actual, expected.attended)
+    expectClose(actualWeights, expected.weights)
+  })
+
+  test("fused scaled-dot-product attention respects sequence layout masks", () => {
+    const q = makePatternedTensor(4, 5, 12)
+    const k = makePatternedTensor(4, 5, 13)
+    const v = makePatternedTensor(4, 5, 14)
+    const layout = {
+      totalTokens: 4,
+      sequenceIds: new Int32Array([0, 0, 1, 1]),
+      positionIds: new Int32Array([0, 1, 0, 1])
+    }
+    const actual = T.zeros(4, 5)
+    const actualWeights = T.zeros(4, 4)
+
+    const expected = referenceCausalAttention(q, k, v, layout)
+
+    Ops.fusedScaledDotProductAttentionIntoSync(q, k, v, actual, {
+      causalMask: true,
+      layout,
+      weightsOut: actualWeights
+    })
+
+    expectClose(actual, expected.attended)
+    expectClose(actualWeights, expected.weights)
+  })
+
+  test("fused SDPA backward matches composed causal path", () => {
+    const q = makePatternedTensor(4, 6, 15)
+    const k = makePatternedTensor(4, 6, 16)
+    const v = makePatternedTensor(4, 5, 17)
+    const dOut = makePatternedTensor(4, 5, 18)
+    const workspace = new TensorWorkspace()
+    const actualDQ = T.zeros(4, 6)
+    const actualDK = T.zeros(4, 6)
+    const actualDV = T.zeros(4, 5)
+
+    const expected = referenceSdpaBackward(q, k, v, dOut)
+
+    Ops.fusedSdpaBackwardIntoSync(q, k, v, dOut, actualDQ, actualDK, actualDV, {
+      causalMask: true,
+      workspace
+    })
+
+    expectClose(actualDQ, expected.dQ)
+    expectClose(actualDK, expected.dK)
+    expectClose(actualDV, expected.dV)
+  })
+
+  test("fused SDPA backward respects sequence layout masks", () => {
+    const q = makePatternedTensor(4, 5, 19)
+    const k = makePatternedTensor(4, 5, 20)
+    const v = makePatternedTensor(4, 4, 21)
+    const dOut = makePatternedTensor(4, 4, 22)
+    const layout = {
+      totalTokens: 4,
+      sequenceIds: new Int32Array([0, 0, 1, 1]),
+      positionIds: new Int32Array([0, 1, 0, 1])
+    }
+    const actualDQ = T.fromArray(4, 5, new Float32Array(20).fill(7))
+    const actualDK = T.fromArray(4, 5, new Float32Array(20).fill(7))
+    const actualDV = T.fromArray(4, 4, new Float32Array(16).fill(7))
+
+    const expected = referenceSdpaBackward(q, k, v, dOut, layout)
+
+    Ops.fusedSdpaBackwardIntoSync(q, k, v, dOut, actualDQ, actualDK, actualDV, {
+      causalMask: true,
+      layout
+    })
+
+    expectClose(actualDQ, expected.dQ)
+    expectClose(actualDK, expected.dK)
+    expectClose(actualDV, expected.dV)
+  })
+
+  test("fused SDPA backward rejects aliased outputs", () => {
+    const q = makePatternedTensor(2, 3, 23)
+    const k = makePatternedTensor(2, 3, 24)
+    const v = makePatternedTensor(2, 2, 25)
+    const dOut = makePatternedTensor(2, 2, 26)
+    const dK = T.zeros(2, 3)
+    const dV = T.zeros(2, 2)
+
+    expect(() =>
+      Ops.fusedSdpaBackwardIntoSync(q, k, v, dOut, q, dK, dV, {
+        causalMask: true
+      })
+    ).toThrow("must not alias input storage")
+  })
+
+  test("fused SDPA backward rejects overlapping output subarrays from shared storage", () => {
+    const q = makePatternedTensor(2, 3, 27)
+    const k = makePatternedTensor(2, 3, 28)
+    const v = makePatternedTensor(2, 2, 29)
+    const dOut = makePatternedTensor(2, 2, 30)
+    const shared = new Float32Array(16)
+    const dQ = T.make(2, 3, shared.subarray(0, 6))
+    const dK = T.make(2, 3, shared.subarray(4, 10))
+    const dV = T.make(2, 2, shared.subarray(10, 14))
+
+    expect(() =>
+      Ops.fusedSdpaBackwardIntoSync(q, k, v, dOut, dQ, dK, dV, {
+        causalMask: true
+      })
+    ).toThrow("must not alias each other")
+  })
+
+  test("fused SDPA backward allows disjoint output subarrays from shared storage", () => {
+    const q = makePatternedTensor(2, 3, 31)
+    const k = makePatternedTensor(2, 3, 32)
+    const v = makePatternedTensor(2, 2, 33)
+    const dOut = makePatternedTensor(2, 2, 34)
+    const shared = new Float32Array(16)
+    const actualDQ = T.make(2, 3, shared.subarray(0, 6))
+    const actualDK = T.make(2, 3, shared.subarray(6, 12))
+    const actualDV = T.make(2, 2, shared.subarray(12, 16))
+    const expected = referenceSdpaBackward(q, k, v, dOut)
+
+    Ops.fusedSdpaBackwardIntoSync(q, k, v, dOut, actualDQ, actualDK, actualDV, {
+      causalMask: true
+    })
+
+    expectClose(actualDQ, expected.dQ)
+    expectClose(actualDK, expected.dK)
+    expectClose(actualDV, expected.dV)
   })
 
   test("gatherRowsInto matches allocating gatherRows", () => {

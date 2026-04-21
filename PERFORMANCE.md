@@ -12,6 +12,14 @@ Performance work in this repo should preserve the Effect-first architecture.
 
 ## Done
 
+- [x] **Fused scaled-dot-product attention forward and backward kernels**
+  - Implemented in:
+    - [src/tensor/ops.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/ops.ts:1)
+    - [src/model/SelfAttention.ts](/Users/erayack/Desktop/code/RustGPT/src/model/SelfAttention.ts:1)
+  - `fusedScaledDotProductAttentionIntoSync` computes QKᵀ + scale + causal/layout mask + stable row-wise softmax + V accumulation in a single two-pass row kernel backed by one `O(seq_k)` scratch vector, removing the separate `[seq, seq]` `scores` and `attnWeights` tensors from every attention forward. Inference, prefill, and decode paths skip the attention-weight write entirely; training forward no longer caches attention weights at all.
+  - `fusedSdpaBackwardIntoSync` replays the fused forward from cached `q`, `k`, `v` plus the optional `SequenceLayout` and writes `dQ`, `dK`, `dV` directly using two `O(seq_k)` scratch vectors, removing the `gradAttnWeights`, `gradScores`, `gradV`, `gradQ`, `gradK` intermediates (and the per-layer `attnWeights` cache slot) from the training backward path.
+  - `SelfAttention.forwardSync`, `prefillSync`, `decodeStepSync`, and `backwardSync` all route through the fused kernels, with decode wrapping the KV-cache `Float32Array` slabs as zero-copy `Tensor2D` views. Mask handling is centralized in a shared `isMaskedAttentionPosition` predicate so `maskCausalInPlace` and the fused kernels stay in lockstep, and both kernels reject output/input aliasing before entering their hot loops.
+
 - [x] **Hot layers now reuse grow-only workspaces and output buffers**
   - Implemented in:
     - [src/tensor/Workspace.ts](/Users/erayack/Desktop/code/RustGPT/src/tensor/Workspace.ts:1)
@@ -103,7 +111,7 @@ Performance work in this repo should preserve the Effect-first architecture.
 
 - [x] **Attention backward now uses cached forward intermediates**
   - Implemented in [src/model/SelfAttention.ts](/Users/erayack/Desktop/code/RustGPT/src/model/SelfAttention.ts:19).
-  - `q`, `k`, `v`, and `attnWeights` are cached during forward and reused in backward.
+  - `q`, `k`, and `v` are cached during forward (alongside the optional `SequenceLayout`) and reused directly by the fused SDPA backward kernel instead of being recomputed from input.
 
 - [x] **LayerNorm backward now uses cached forward intermediates**
   - Implemented in [src/model/LayerNorm.ts](/Users/erayack/Desktop/code/RustGPT/src/model/LayerNorm.ts:16).

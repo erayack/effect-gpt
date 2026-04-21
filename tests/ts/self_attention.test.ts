@@ -54,6 +54,54 @@ describe("SelfAttention", () => {
     expectNotClose(attention.wQKV, wQKVBefore)
   })
 
+  test("backward replays masked attention correctly for flattened sequence batches", () => {
+    const makeSequence = (rows: number, base: number) => {
+      const sequence = T.zeros(rows, EMBEDDING_DIM)
+      for (let row = 0; row < sequence.rows; row++) {
+        for (let col = 0; col < sequence.cols; col++) {
+          sequence.data[row * sequence.cols + col] = base + (row + 1) * 0.05 + (col % 11) * 0.01
+        }
+      }
+      return sequence
+    }
+
+    const sequenceA = makeSequence(2, 0.25)
+    const sequenceB = makeSequence(2, -0.4)
+    const flattened = T.zeros(4, EMBEDDING_DIM)
+    flattened.data.set(sequenceA.data, 0)
+    flattened.data.set(sequenceB.data, sequenceA.data.length)
+
+    const layout: SequenceLayout = {
+      totalTokens: 4,
+      sequenceLengths: [2, 2],
+      sequenceIds: new Int32Array([0, 0, 1, 1]),
+      positionIds: new Int32Array([0, 1, 0, 1])
+    }
+
+    const batchedAttention = makeSelfAttention()
+    const separateAttentionA = makeSelfAttention()
+    const separateAttentionB = makeSelfAttention()
+    separateAttentionA.wQKV = T.clone(batchedAttention.wQKV)
+    separateAttentionB.wQKV = T.clone(batchedAttention.wQKV)
+
+    runEffect(batchedAttention.forward(flattened, { sequenceLayout: layout }))
+    const gradOut = T.ones(4, EMBEDDING_DIM)
+    const actual = runEffect(batchedAttention.backward(gradOut, 0))
+
+    runEffect(separateAttentionA.forward(sequenceA))
+    const gradA = runEffect(separateAttentionA.backward(T.ones(2, EMBEDDING_DIM), 0))
+    runEffect(separateAttentionB.forward(sequenceB))
+    const gradB = runEffect(separateAttentionB.backward(T.ones(2, EMBEDDING_DIM), 0))
+
+    const expected = T.zeros(4, EMBEDDING_DIM)
+    expected.data.set(gradA.data, 0)
+    expected.data.set(gradB.data, gradA.data.length)
+
+    expectShape(actual, [4, EMBEDDING_DIM])
+    expectFinite(actual)
+    expectClose(actual, expected)
+  })
+
   test("backward returns a stable gradient tensor after later calls reuse workspaces", () => {
     const attention = makeSelfAttention()
 

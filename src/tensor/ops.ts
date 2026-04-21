@@ -34,6 +34,27 @@ export interface MatMulOptions {
   readonly workspace?: TensorWorkspace
 }
 
+export interface FusedScaledDotProductAttentionOptions {
+  readonly causalMask?: boolean
+  readonly layout?: {
+    readonly sequenceIds: Int32Array
+    readonly positionIds: Int32Array
+    readonly totalTokens: number
+  }
+  readonly weightsOut?: Tensor2D
+  readonly workspace?: TensorWorkspace
+}
+
+export interface FusedScaledDotProductAttentionBackwardOptions {
+  readonly causalMask?: boolean
+  readonly layout?: {
+    readonly sequenceIds: Int32Array
+    readonly positionIds: Int32Array
+    readonly totalTokens: number
+  }
+  readonly workspace?: TensorWorkspace
+}
+
 export const toShapeError = (error: unknown): ShapeError =>
   error instanceof ShapeError ? error : (error as ShapeError)
 
@@ -421,6 +442,381 @@ export const softmaxRowsInPlace = (t: Tensor2D): void => {
   }
 }
 
+const isMaskedAttentionPosition = (
+  queryIndex: number,
+  keyIndex: number,
+  causalMask: boolean,
+  layout?: {
+    readonly sequenceIds: Int32Array
+    readonly positionIds: Int32Array
+    readonly totalTokens: number
+  }
+): boolean => {
+  if (!causalMask) {
+    return false
+  }
+  if (!layout) {
+    return keyIndex > queryIndex
+  }
+  return (
+    layout.sequenceIds[keyIndex] !== layout.sequenceIds[queryIndex] ||
+    layout.positionIds[keyIndex] > layout.positionIds[queryIndex]
+  )
+}
+
+const validateNoAttentionAliasing = (
+  op: string,
+  q: Tensor2D,
+  k: Tensor2D,
+  v: Tensor2D,
+  out: Tensor2D,
+  weightsOut?: Tensor2D
+): void => {
+  if (out.data === q.data || out.data === k.data || out.data === v.data) {
+    throw new ShapeError(`${op}: output tensor must not alias input storage`)
+  }
+  if (!weightsOut) {
+    return
+  }
+  if (
+    weightsOut.data === q.data ||
+    weightsOut.data === k.data ||
+    weightsOut.data === v.data ||
+    weightsOut.data === out.data
+  ) {
+    throw new ShapeError(`${op}: weights tensor must not alias input or output storage`)
+  }
+}
+
+const typedArrayRangesOverlap = (a: Float32Array, b: Float32Array): boolean => {
+  if (a.buffer !== b.buffer) {
+    return false
+  }
+
+  const aStart = a.byteOffset
+  const aEnd = aStart + a.byteLength
+  const bStart = b.byteOffset
+  const bEnd = bStart + b.byteLength
+  return aStart < bEnd && bStart < aEnd
+}
+
+const validateNoAttentionBackwardAliasing = (
+  op: string,
+  q: Tensor2D,
+  k: Tensor2D,
+  v: Tensor2D,
+  dOut: Tensor2D,
+  dQ: Tensor2D,
+  dK: Tensor2D,
+  dV: Tensor2D
+): void => {
+  if (
+    typedArrayRangesOverlap(dQ.data, q.data) ||
+    typedArrayRangesOverlap(dQ.data, k.data) ||
+    typedArrayRangesOverlap(dQ.data, v.data) ||
+    typedArrayRangesOverlap(dQ.data, dOut.data) ||
+    typedArrayRangesOverlap(dK.data, q.data) ||
+    typedArrayRangesOverlap(dK.data, k.data) ||
+    typedArrayRangesOverlap(dK.data, v.data) ||
+    typedArrayRangesOverlap(dK.data, dOut.data) ||
+    typedArrayRangesOverlap(dV.data, q.data) ||
+    typedArrayRangesOverlap(dV.data, k.data) ||
+    typedArrayRangesOverlap(dV.data, v.data) ||
+    typedArrayRangesOverlap(dV.data, dOut.data)
+  ) {
+    throw new ShapeError(`${op}: output tensors must not alias input storage`)
+  }
+  if (
+    typedArrayRangesOverlap(dQ.data, dK.data) ||
+    typedArrayRangesOverlap(dQ.data, dV.data) ||
+    typedArrayRangesOverlap(dK.data, dV.data)
+  ) {
+    throw new ShapeError(`${op}: output tensors must not alias each other`)
+  }
+}
+
+const zeroAttentionBackwardOutputs = (dQ: Float32Array, dK: Float32Array, dV: Float32Array): void => {
+  if (dQ.buffer === dK.buffer && dQ.buffer === dV.buffer) {
+    const start = Math.min(dQ.byteOffset, dK.byteOffset, dV.byteOffset)
+    const end = Math.max(
+      dQ.byteOffset + dQ.byteLength,
+      dK.byteOffset + dK.byteLength,
+      dV.byteOffset + dV.byteLength
+    )
+    new Float32Array(dQ.buffer, start, (end - start) / Float32Array.BYTES_PER_ELEMENT).fill(0)
+    return
+  }
+
+  dQ.fill(0)
+  dK.fill(0)
+  dV.fill(0)
+}
+
+export const fusedScaledDotProductAttentionIntoSync = (
+  q: Tensor2D,
+  k: Tensor2D,
+  v: Tensor2D,
+  out: Tensor2D,
+  options?: FusedScaledDotProductAttentionOptions
+): void => {
+  if (q.cols !== k.cols) {
+    throw new ShapeError(`fusedScaledDotProductAttention: q cols ${q.cols} do not match k cols ${k.cols}`)
+  }
+  if (k.rows !== v.rows) {
+    throw new ShapeError(`fusedScaledDotProductAttention: k rows ${k.rows} do not match v rows ${v.rows}`)
+  }
+  if (out.rows !== q.rows || out.cols !== v.cols) {
+    throw new ShapeError(
+      `fusedScaledDotProductAttention: output shape (${out.rows},${out.cols}) does not match expected (${q.rows},${v.cols})`
+    )
+  }
+
+  const weightsOut = options?.weightsOut
+  if (weightsOut && (weightsOut.rows !== q.rows || weightsOut.cols !== k.rows)) {
+    throw new ShapeError(
+      `fusedScaledDotProductAttention: weights shape (${weightsOut.rows},${weightsOut.cols}) does not match expected (${q.rows},${k.rows})`
+    )
+  }
+  validateNoAttentionAliasing("fusedScaledDotProductAttention", q, k, v, out, weightsOut)
+
+  const causalMask = options?.causalMask === true
+  const layout = options?.layout
+  if (layout && !causalMask) {
+    throw new ShapeError("fusedScaledDotProductAttention: layout requires causalMask=true")
+  }
+  if (layout && (q.rows !== k.rows || layout.totalTokens !== q.rows)) {
+    throw new ShapeError(
+      `fusedScaledDotProductAttention: layout totalTokens (${layout.totalTokens}) incompatible with q/k shapes ${q.rows}x${k.rows}`
+    )
+  }
+
+  const scratch =
+    options?.workspace?.borrowVectorAtLeast("fusedAttentionScores", k.rows) ??
+    new Float32Array(k.rows)
+
+  const qCols = q.cols
+  const vCols = v.cols
+  const scale = 1 / Math.sqrt(qCols)
+  const qData = q.data
+  const kData = k.data
+  const vData = v.data
+  const outData = out.data
+  outData.fill(0)
+
+  for (let queryRow = 0; queryRow < q.rows; queryRow++) {
+    const qOffset = queryRow * qCols
+    let maxScore = -Infinity
+
+    for (let keyRow = 0; keyRow < k.rows; keyRow++) {
+      if (isMaskedAttentionPosition(queryRow, keyRow, causalMask, layout)) {
+        scratch[keyRow] = -Infinity
+        continue
+      }
+
+      const kOffset = keyRow * qCols
+      let score = 0
+      for (let col = 0; col < qCols; col++) {
+        score += qData[qOffset + col]! * kData[kOffset + col]!
+      }
+      score *= scale
+      scratch[keyRow] = score
+      if (score > maxScore) {
+        maxScore = score
+      }
+    }
+
+    let sumExp = 0
+    for (let keyRow = 0; keyRow < k.rows; keyRow++) {
+      const score = scratch[keyRow]!
+      if (score === -Infinity) {
+        scratch[keyRow] = 0
+        if (weightsOut) {
+          weightsOut.data[queryRow * k.rows + keyRow] = 0
+        }
+        continue
+      }
+      const weight = Math.exp(score - maxScore)
+      scratch[keyRow] = weight
+      sumExp += weight
+    }
+
+    const outOffset = queryRow * vCols
+    for (let keyRow = 0; keyRow < k.rows; keyRow++) {
+      const weight = sumExp === 0 ? 0 : scratch[keyRow]! / sumExp
+      if (weightsOut) {
+        weightsOut.data[queryRow * k.rows + keyRow] = weight
+      }
+      if (weight === 0) {
+        continue
+      }
+      const vOffset = keyRow * vCols
+      for (let col = 0; col < vCols; col++) {
+        outData[outOffset + col] += weight * vData[vOffset + col]!
+      }
+    }
+  }
+}
+
+export const fusedScaledDotProductAttentionSync = (
+  q: Tensor2D,
+  k: Tensor2D,
+  v: Tensor2D,
+  options?: FusedScaledDotProductAttentionOptions
+): Tensor2D => {
+  const out = T.zeros(q.rows, v.cols)
+  fusedScaledDotProductAttentionIntoSync(q, k, v, out, options)
+  return out
+}
+
+export const fusedSdpaBackwardIntoSync = (
+  q: Tensor2D,
+  k: Tensor2D,
+  v: Tensor2D,
+  dOut: Tensor2D,
+  dQ: Tensor2D,
+  dK: Tensor2D,
+  dV: Tensor2D,
+  options?: FusedScaledDotProductAttentionBackwardOptions
+): void => {
+  if (q.cols !== k.cols) {
+    throw new ShapeError(`fusedSdpaBackward: q cols ${q.cols} do not match k cols ${k.cols}`)
+  }
+  if (k.rows !== v.rows) {
+    throw new ShapeError(`fusedSdpaBackward: k rows ${k.rows} do not match v rows ${v.rows}`)
+  }
+  if (dOut.rows !== q.rows || dOut.cols !== v.cols) {
+    throw new ShapeError(
+      `fusedSdpaBackward: dOut shape (${dOut.rows},${dOut.cols}) does not match expected (${q.rows},${v.cols})`
+    )
+  }
+  validateOutputShape("fusedSdpaBackward", dQ, q.rows, q.cols)
+  validateOutputShape("fusedSdpaBackward", dK, k.rows, k.cols)
+  validateOutputShape("fusedSdpaBackward", dV, v.rows, v.cols)
+  validateNoAttentionBackwardAliasing("fusedSdpaBackward", q, k, v, dOut, dQ, dK, dV)
+
+  const causalMask = options?.causalMask === true
+  const layout = options?.layout
+  if (layout && !causalMask) {
+    throw new ShapeError("fusedSdpaBackward: layout requires causalMask=true")
+  }
+  if (layout && (q.rows !== k.rows || layout.totalTokens !== q.rows)) {
+    throw new ShapeError(`fusedSdpaBackward: layout totalTokens (${layout.totalTokens}) incompatible with q/k shapes ${q.rows}x${k.rows}`)
+  }
+
+  const weightsScratch =
+    options?.workspace?.borrowVectorAtLeast("fusedSdpaBackwardWeights", k.rows) ??
+    new Float32Array(k.rows)
+  const gradScratch =
+    options?.workspace?.borrowVectorAtLeast("fusedSdpaBackwardGradScores", k.rows) ??
+    new Float32Array(k.rows)
+
+  const qRows = q.rows
+  const qCols = q.cols
+  const kRows = k.rows
+  const vCols = v.cols
+  const scale = 1 / Math.sqrt(qCols)
+  const qData = q.data
+  const kData = k.data
+  const vData = v.data
+  const dOutData = dOut.data
+  const dQData = dQ.data
+  const dKData = dK.data
+  const dVData = dV.data
+
+  zeroAttentionBackwardOutputs(dQData, dKData, dVData)
+
+  for (let queryRow = 0; queryRow < qRows; queryRow++) {
+    const qOffset = queryRow * qCols
+    const dOutOffset = queryRow * vCols
+    let maxScore = -Infinity
+
+    for (let keyRow = 0; keyRow < kRows; keyRow++) {
+      if (isMaskedAttentionPosition(queryRow, keyRow, causalMask, layout)) {
+        weightsScratch[keyRow] = -Infinity
+        continue
+      }
+
+      const kOffset = keyRow * qCols
+      let score = 0
+      for (let col = 0; col < qCols; col++) {
+        score += qData[qOffset + col]! * kData[kOffset + col]!
+      }
+      score *= scale
+      weightsScratch[keyRow] = score
+      if (score > maxScore) {
+        maxScore = score
+      }
+    }
+
+    let sumExp = 0
+    for (let keyRow = 0; keyRow < kRows; keyRow++) {
+      const score = weightsScratch[keyRow]!
+      if (score === -Infinity) {
+        weightsScratch[keyRow] = 0
+        continue
+      }
+      const weight = Math.exp(score - maxScore)
+      weightsScratch[keyRow] = weight
+      sumExp += weight
+    }
+
+    let softmaxDot = 0
+    for (let keyRow = 0; keyRow < kRows; keyRow++) {
+      const weight = sumExp === 0 ? 0 : weightsScratch[keyRow]! / sumExp
+      weightsScratch[keyRow] = weight
+      if (weight === 0) {
+        gradScratch[keyRow] = 0
+        continue
+      }
+
+      const vOffset = keyRow * vCols
+      let gradWeight = 0
+      for (let col = 0; col < vCols; col++) {
+        const dOutValue = dOutData[dOutOffset + col]!
+        gradWeight += dOutValue * vData[vOffset + col]!
+        dVData[vOffset + col] += weight * dOutValue
+      }
+      gradScratch[keyRow] = gradWeight
+      softmaxDot += weight * gradWeight
+    }
+
+    for (let keyRow = 0; keyRow < kRows; keyRow++) {
+      const weight = weightsScratch[keyRow]!
+      if (weight === 0) {
+        gradScratch[keyRow] = 0
+        continue
+      }
+      gradScratch[keyRow] = weight * (gradScratch[keyRow]! - softmaxDot) * scale
+    }
+
+    for (let keyRow = 0; keyRow < kRows; keyRow++) {
+      const dScore = gradScratch[keyRow]!
+      if (dScore === 0) {
+        continue
+      }
+      const kOffset = keyRow * qCols
+      for (let col = 0; col < qCols; col++) {
+        dQData[qOffset + col] += dScore * kData[kOffset + col]!
+        dKData[kOffset + col] += dScore * qData[qOffset + col]!
+      }
+    }
+  }
+}
+
+export const fusedSdpaBackwardInto = (
+  q: Tensor2D,
+  k: Tensor2D,
+  v: Tensor2D,
+  dOut: Tensor2D,
+  dQ: Tensor2D,
+  dK: Tensor2D,
+  dV: Tensor2D,
+  options?: FusedScaledDotProductAttentionBackwardOptions
+): Effect.Effect<void, ShapeError> =>
+  syncShapeEffect(() => {
+    fusedSdpaBackwardIntoSync(q, k, v, dOut, dQ, dK, dV, options)
+  })
+
 export const transpose = (t: Tensor2D): Tensor2D => {
   const out = T.zeros(t.cols, t.rows)
   transposeInto(t, out)
@@ -603,15 +999,11 @@ export const maskCausalInPlace = (scores: Tensor2D, layout?: { sequenceIds: Int3
         `maskCausalInPlace: layout totalTokens (${layout.totalTokens}) incompatible with scores shape ${seqLen}x${scores.cols}`
       )
     }
-    const sequenceIds = layout.sequenceIds
-    const positionIds = layout.positionIds
     const scoresData = scores.data
     for (let i = 0; i < seqLen; i++) {
       const rowOffset = i * seqLen
-      const querySequenceId = sequenceIds[i]
-      const queryPositionId = positionIds[i]
       for (let j = 0; j < seqLen; j++) {
-        if (sequenceIds[j] !== querySequenceId || positionIds[j] > queryPositionId) {
+        if (isMaskedAttentionPosition(i, j, true, layout)) {
           scoresData[rowOffset + j] = -Infinity
         }
       }

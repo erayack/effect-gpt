@@ -24,7 +24,7 @@ interface SelfAttentionCacheEntry {
   readonly q: Tensor2D
   readonly k: Tensor2D
   readonly v: Tensor2D
-  readonly attnWeights: Tensor2D
+  readonly sequenceLayout?: SequenceLayout
 }
 
 export class SelfAttention implements SyncModelLayer {
@@ -67,12 +67,19 @@ export class SelfAttention implements SyncModelLayer {
     q: Tensor2D,
     k: Tensor2D,
     v: Tensor2D,
-    attnWeights: Tensor2D
+    sequenceLayout?: SequenceLayout
   ): void {
     if (cacheKey !== undefined && this.cache.has(cacheKey)) {
       throw new Ops.ShapeError("SelfAttention.forward received a cacheKey that is already active")
     }
-    const cached = { workspace, input, q, k, v, attnWeights }
+    const cached: SelfAttentionCacheEntry = {
+      workspace,
+      input,
+      q,
+      k,
+      v,
+      ...(sequenceLayout ? { sequenceLayout } : {})
+    }
     if (cacheKey !== undefined) {
       this.cache.set(cacheKey, cached)
     }
@@ -133,19 +140,21 @@ export class SelfAttention implements SyncModelLayer {
     k: Tensor2D,
     v: Tensor2D,
     workspace: TensorWorkspace,
-    layout?: SequenceLayout
-  ): { attnWeights: Tensor2D; attended: Tensor2D } {
-    const dk = Math.sqrt(this.embeddingDim)
-    const scores = workspace.borrowTensor("scores", q.rows, k.rows)
-    Ops.matMulIntoSync(q, k, scores, { transposeB: true, workspace })
-    Ops.mulScalarInPlace(scores, 1 / dk)
-    Ops.maskCausalInPlace(scores, layout)
-
-    const attnWeights = workspace.borrowTensor("attnWeights", scores.rows, scores.cols)
-    Ops.softmaxRowsInto(scores, attnWeights)
-    const attended = workspace.borrowTensor("attended", attnWeights.rows, v.cols)
-    Ops.matMulIntoSync(attnWeights, v, attended, { workspace })
-    return { attnWeights, attended }
+    options?: {
+      readonly layout?: SequenceLayout
+      readonly causalMask?: boolean
+      readonly weightsOut?: Tensor2D
+    }
+  ): Tensor2D {
+    const attended = workspace.borrowTensor("attended", q.rows, v.cols)
+    const fusedOptions: Ops.FusedScaledDotProductAttentionOptions = {
+      causalMask: options?.causalMask ?? true,
+      workspace,
+      ...(options?.layout ? { layout: options.layout } : {}),
+      ...(options?.weightsOut ? { weightsOut: options.weightsOut } : {})
+    }
+    Ops.fusedScaledDotProductAttentionIntoSync(q, k, v, attended, fusedOptions)
+    return attended
   }
 
   forwardSync(input: Tensor2D, context?: LayerForwardContext): Tensor2D {
@@ -154,11 +163,14 @@ export class SelfAttention implements SyncModelLayer {
     let stored = false
     try {
       const { q, k, v } = this.computeQKVSync(input, workspace)
-      const { attnWeights, attended } = this.attentionSync(q, k, v, workspace, context?.sequenceLayout)
+      const attended = this.attentionSync(q, k, v, workspace, {
+        causalMask: true,
+        ...(context?.sequenceLayout ? { layout: context.sequenceLayout } : {})
+      })
       const output = workspace.borrowTensor("output", attended.rows, attended.cols)
       Ops.addIntoSync(attended, input, output)
       if (captureCache) {
-        this.storeCache(context?.cacheKey, workspace, input, q, k, v, attnWeights)
+        this.storeCache(context?.cacheKey, workspace, input, q, k, v, context?.sequenceLayout)
         stored = true
       }
       return output
@@ -229,7 +241,7 @@ export class SelfAttention implements SyncModelLayer {
     this.ensureEmptyKvCacheSync(cache)
     const { q, k, v } = this.computeQKVSync(input, workspace)
     this.storeKvRowsSync(k, v, cache)
-    const { attended } = this.attentionSync(q, k, v, workspace)
+    const attended = this.attentionSync(q, k, v, workspace, { causalMask: true })
     const output = workspace.borrowTensor("output", attended.rows, attended.cols)
     Ops.addIntoSync(attended, input, output)
     return output
@@ -292,27 +304,6 @@ export class SelfAttention implements SyncModelLayer {
     return Ops.syncShapeEffect(() => this.decodeStepSync(input, cache))
   }
 
-  private static softmaxBackward(softmaxOutput: Tensor2D, gradOutput: Tensor2D): Tensor2D {
-    const gradInput = T.zeros(softmaxOutput.rows, softmaxOutput.cols)
-    SelfAttention.softmaxBackwardInto(softmaxOutput, gradOutput, gradInput)
-    return gradInput
-  }
-
-  private static softmaxBackwardInto(softmaxOutput: Tensor2D, gradOutput: Tensor2D, gradInput: Tensor2D): void {
-    for (let i = 0; i < softmaxOutput.rows; i++) {
-      let dot = 0
-      const rowOffset = i * softmaxOutput.cols
-      for (let j = 0; j < softmaxOutput.cols; j++) {
-        dot += softmaxOutput.data[rowOffset + j] * gradOutput.data[rowOffset + j]
-      }
-      for (let j = 0; j < softmaxOutput.cols; j++) {
-        const y = softmaxOutput.data[rowOffset + j]
-        const dy = gradOutput.data[rowOffset + j]
-        gradInput.data[rowOffset + j] = y * (dy - dot)
-      }
-    }
-  }
-
   backwardSync(dOut: Tensor2D, lr: number, cacheKey?: LayerCacheKey): Tensor2D {
     const cached = (cacheKey !== undefined ? this.cache.get(cacheKey) : undefined) ?? this.lastCache
     if (!cached) {
@@ -323,24 +314,23 @@ export class SelfAttention implements SyncModelLayer {
     }
     this.lastCache = null
 
-    const { workspace, input, q, k, v, attnWeights } = cached
+    const { workspace, input, q, k, v, sequenceLayout } = cached
     try {
-      const scale = Math.sqrt(this.embeddingDim)
-
-      const gradAttnWeights = workspace.borrowTensor("gradAttnWeights", dOut.rows, v.rows)
-      Ops.matMulIntoSync(dOut, v, gradAttnWeights, { transposeB: true, workspace })
-
-      const gradV = workspace.borrowTensor("gradV", attnWeights.cols, dOut.cols)
-      Ops.matMulIntoSync(attnWeights, dOut, gradV, { transposeA: true, workspace })
-
-      const gradScores = workspace.borrowTensor("gradScores", attnWeights.rows, attnWeights.cols)
-      SelfAttention.softmaxBackwardInto(attnWeights, gradAttnWeights, gradScores)
-      Ops.mulScalarInPlace(gradScores, 1 / scale)
-
-      const gradQ = workspace.borrowTensor("gradQ", gradScores.rows, this.embeddingDim)
-      Ops.matMulIntoSync(gradScores, k, gradQ, { workspace })
-      const gradK = workspace.borrowTensor("gradK", gradScores.cols, this.embeddingDim)
-      Ops.matMulIntoSync(gradScores, q, gradK, { transposeA: true, workspace })
+      const gradQKVScratch = workspace.borrowVectorAtLeast(
+        "fusedSdpaGradQKV",
+        q.rows * this.embeddingDim + k.rows * this.embeddingDim + v.rows * v.cols
+      )
+      const gradQSize = q.rows * this.embeddingDim
+      const gradKSize = k.rows * this.embeddingDim
+      const gradVSize = v.rows * v.cols
+      const gradQ = T.make(q.rows, this.embeddingDim, gradQKVScratch.subarray(0, gradQSize))
+      const gradK = T.make(k.rows, this.embeddingDim, gradQKVScratch.subarray(gradQSize, gradQSize + gradKSize))
+      const gradV = T.make(v.rows, v.cols, gradQKVScratch.subarray(gradQSize + gradKSize, gradQSize + gradKSize + gradVSize))
+      Ops.fusedSdpaBackwardIntoSync(q, k, v, dOut, gradQ, gradK, gradV, {
+        causalMask: true,
+        workspace,
+        ...(sequenceLayout ? { layout: sequenceLayout } : {})
+      })
 
       const gradQKV = workspace.borrowTensor("gradQKV", gradQ.rows, this.embeddingDim * 3)
       this.packGradientsSync(gradQ, gradK, gradV, gradQKV)
