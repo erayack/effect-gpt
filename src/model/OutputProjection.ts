@@ -131,7 +131,7 @@ export class OutputProjection implements SyncModelLayer {
       const gradBOut = workspace.borrowTensor("gradBOut", 1, dOut.cols)
       Ops.sumColsInto(dOut, gradBOut)
 
-      const gradInput = T.zeros(dOut.rows, this.wOut.rows)
+      const gradInput = workspace.borrowTensor("gradInput", dOut.rows, this.wOut.rows)
       Ops.matMulIntoSync(dOut, this.wOut, gradInput, { transposeB: true, workspace })
 
       this.optimizerWOut.step(this.wOut, gradWOut, lr)

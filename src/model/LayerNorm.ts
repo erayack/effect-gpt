@@ -190,7 +190,7 @@ export class LayerNorm implements SyncModelLayer {
         gradBeta.data[j] = sumBeta
       }
 
-      const gradInput = T.zeros(rows, cols)
+      const gradInput = workspace.borrowTensor("gradInput", rows, cols)
       for (let i = 0; i < rows; i++) {
         const rstdVal = rstd.data[i]
 

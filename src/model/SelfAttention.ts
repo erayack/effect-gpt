@@ -341,7 +341,7 @@ export class SelfAttention implements SyncModelLayer {
       const gradInputAttention = workspace.borrowTensor("gradInputAttention", gradQKV.rows, input.cols)
       Ops.matMulIntoSync(gradQKV, this.wQKV, gradInputAttention, { transposeB: true, workspace })
 
-      const gradInput = T.zeros(gradInputAttention.rows, gradInputAttention.cols)
+      const gradInput = workspace.borrowTensor("gradInput", gradInputAttention.rows, gradInputAttention.cols)
       Ops.addIntoSync(gradInputAttention, dOut, gradInput)
 
       this.projectionOptimizer.step(this.wQKV, gradWQKV, lr)

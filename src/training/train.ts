@@ -8,10 +8,11 @@ import * as Option from "effect/Option"
 import type { ShapeError } from "../tensor/ops"
 import * as Ops from "../tensor/ops"
 import * as T from "../tensor/Tensor2D"
+import { TensorWorkspace } from "../tensor/Workspace"
 import { tokenize } from "../tokenize/tokenize"
 import type { LLM } from "../model/LLM"
 import { runBackwardPass, runForwardPass, type SequenceLayout } from "../model/ModelLayer"
-import { crossEntropyLossAndDLogitsFromLogits } from "./loss"
+import { crossEntropyLossAndDLogitsFromLogitsInto } from "./loss"
 import { clipGlobalL2 } from "./clip"
 import type { LoggerServiceId } from "../services/Logger"
 import { info } from "../services/Logger"
@@ -232,6 +233,7 @@ const trainWithStreamFactory = <E, R>(
     ) {
       const epochResult = yield* timed(`epoch_${epoch}`, Effect.gen(function* () {
         const totalLossRef = yield* Ref.make(0)
+        const trainingWorkspace = new TensorWorkspace()
 
         const trainBatch = Effect.fn("Train.trainBatch")(function* (batch: TrainingBatch) {
           let input = T.fromArray(1, batch.tokenCount, batch.inputIds)
@@ -240,8 +242,9 @@ const trainWithStreamFactory = <E, R>(
           input = yield* mapShapeError(runForwardPass(llm.network, input, context))
 
           const logits = input
-          const { loss, grads: initialGrads } = yield* wrapThrowing(
-            () => crossEntropyLossAndDLogitsFromLogits(logits, batch.targetIds),
+          const initialGrads = trainingWorkspace.borrowTensor("initialGrads", logits.rows, logits.cols)
+          const loss = yield* wrapThrowing(
+            () => crossEntropyLossAndDLogitsFromLogitsInto(logits, batch.targetIds, initialGrads),
             mapShapeUnknown
           )
           yield* Ref.update(totalLossRef, (current) => current + loss * batch.tokenCount)

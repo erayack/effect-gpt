@@ -156,24 +156,22 @@ export class FeedForward implements SyncModelLayer {
       const gradB2 = workspace.borrowTensor("gradB2", 1, dOut.cols)
       Ops.sumColsInto(dOut, gradB2)
 
-      const gradHiddenPost = workspace.borrowTensor("gradHiddenPost", dOut.rows, this.w2.rows)
-      Ops.matMulIntoSync(dOut, this.w2, gradHiddenPost, { transposeB: true, workspace })
-
-      const reluGrad = workspace.borrowTensor("reluGrad", hiddenPostActivation.rows, hiddenPostActivation.cols)
+      const gradHidden = workspace.borrowTensor("gradHidden", dOut.rows, this.w2.rows)
+      Ops.matMulIntoSync(dOut, this.w2, gradHidden, { transposeB: true, workspace })
       for (let i = 0; i < hiddenPostActivation.data.length; i++) {
-        reluGrad.data[i] = hiddenPostActivation.data[i] > 0 ? 1 : 0
+        if (hiddenPostActivation.data[i] <= 0) {
+          gradHidden.data[i] = 0
+        }
       }
-      const gradHiddenPre = workspace.borrowTensor("gradHiddenPre", gradHiddenPost.rows, gradHiddenPost.cols)
-      Ops.mulIntoSync(gradHiddenPost, reluGrad, gradHiddenPre)
 
-      const gradW1 = workspace.borrowTensor("gradW1", input.cols, gradHiddenPre.cols)
-      Ops.matMulIntoSync(input, gradHiddenPre, gradW1, { transposeA: true, workspace })
-      const gradB1 = workspace.borrowTensor("gradB1", 1, gradHiddenPre.cols)
-      Ops.sumColsInto(gradHiddenPre, gradB1)
+      const gradW1 = workspace.borrowTensor("gradW1", input.cols, gradHidden.cols)
+      Ops.matMulIntoSync(input, gradHidden, gradW1, { transposeA: true, workspace })
+      const gradB1 = workspace.borrowTensor("gradB1", 1, gradHidden.cols)
+      Ops.sumColsInto(gradHidden, gradB1)
 
-      const gradInputFF = workspace.borrowTensor("gradInputFF", gradHiddenPre.rows, this.w1.rows)
-      Ops.matMulIntoSync(gradHiddenPre, this.w1, gradInputFF, { transposeB: true, workspace })
-      const gradInput = T.zeros(gradInputFF.rows, gradInputFF.cols)
+      const gradInputFF = workspace.borrowTensor("gradInputFF", gradHidden.rows, this.w1.rows)
+      Ops.matMulIntoSync(gradHidden, this.w1, gradInputFF, { transposeB: true, workspace })
+      const gradInput = workspace.borrowTensor("gradInput", gradInputFF.rows, gradInputFF.cols)
       Ops.addIntoSync(gradInputFF, dOut, gradInput)
 
       this.optimizerW2.step(this.w2, gradW2, lr)
