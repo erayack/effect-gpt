@@ -47,7 +47,7 @@ describe("TransformerBlock", () => {
       input.data[i] = (i % 10) * 0.1
     }
 
-    const wQBefore = T.clone(block.attention.wQ)
+    const wQKVBefore = T.clone(block.attention.wQKV)
     const w1Before = T.clone(block.feedForward.w1)
     const betaBefore = T.clone(block.norm1.beta)
 
@@ -55,7 +55,7 @@ describe("TransformerBlock", () => {
     const dOut = T.ones(2, EMBEDDING_DIM)
     runEffect(block.backward(dOut, 0.01))
 
-    expectNotClose(block.attention.wQ, wQBefore)
+    expectNotClose(block.attention.wQKV, wQKVBefore)
     expectNotClose(block.feedForward.w1, w1Before)
     expectNotClose(block.norm1.beta, betaBefore)
   })
@@ -78,9 +78,7 @@ describe("TransformerBlock", () => {
     const expected = runEffect(block.forward(input))
 
     const incremental = makeTransformerBlock()
-    incremental.attention.wQ = T.clone(block.attention.wQ)
-    incremental.attention.wK = T.clone(block.attention.wK)
-    incremental.attention.wV = T.clone(block.attention.wV)
+    incremental.attention.wQKV = T.clone(block.attention.wQKV)
     incremental.feedForward.w1 = T.clone(block.feedForward.w1)
     incremental.feedForward.b1 = T.clone(block.feedForward.b1)
     incremental.feedForward.w2 = T.clone(block.feedForward.w2)
@@ -113,9 +111,7 @@ describe("TransformerBlock", () => {
     const expectedLast = runEffect(Ops.rowAsMatrix(expectedFull, expectedFull.rows - 1))
 
     const incremental = makeTransformerBlock()
-    incremental.attention.wQ = T.clone(block.attention.wQ)
-    incremental.attention.wK = T.clone(block.attention.wK)
-    incremental.attention.wV = T.clone(block.attention.wV)
+    incremental.attention.wQKV = T.clone(block.attention.wQKV)
     incremental.feedForward.w1 = T.clone(block.feedForward.w1)
     incremental.feedForward.b1 = T.clone(block.feedForward.b1)
     incremental.feedForward.w2 = T.clone(block.feedForward.w2)

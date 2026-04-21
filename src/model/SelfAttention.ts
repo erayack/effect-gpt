@@ -21,25 +21,17 @@ export interface SelfAttentionKvCache {
 export class SelfAttention implements SyncModelLayer {
   readonly _tag = "SelfAttention"
   readonly embeddingDim: number
-  wQ: Tensor2D
-  wK: Tensor2D
-  wV: Tensor2D
+  wQKV: Tensor2D
 
   private cache = new Map<LayerCacheKey, { input: Tensor2D; q: Tensor2D; k: Tensor2D; v: Tensor2D; attnWeights: Tensor2D }>()
   private lastCache: { input: Tensor2D; q: Tensor2D; k: Tensor2D; v: Tensor2D; attnWeights: Tensor2D } | null = null
-  optimizerWQ: Adam
-  optimizerWK: Adam
-  optimizerWV: Adam
+  private readonly projectionOptimizer: Adam
 
   constructor(embeddingDim: number = EMBEDDING_DIM, rng: Rng) {
     this.embeddingDim = embeddingDim
     const std = Math.sqrt(2.0 / embeddingDim)
-    this.wQ = Ops.initNormal(embeddingDim, embeddingDim, 0, std, rng)
-    this.wK = Ops.initNormal(embeddingDim, embeddingDim, 0, std, rng)
-    this.wV = Ops.initNormal(embeddingDim, embeddingDim, 0, std, rng)
-    this.optimizerWQ = Adam.make(embeddingDim, embeddingDim)
-    this.optimizerWK = Adam.make(embeddingDim, embeddingDim)
-    this.optimizerWV = Adam.make(embeddingDim, embeddingDim)
+    this.wQKV = Ops.initNormal(embeddingDim, embeddingDim * 3, 0, std, rng)
+    this.projectionOptimizer = Adam.make(embeddingDim, embeddingDim * 3)
   }
 
   private fiberKey(fiberId: FiberId.FiberId): LayerCacheKey {
@@ -47,7 +39,7 @@ export class SelfAttention implements SyncModelLayer {
   }
 
   get parametersCount(): number {
-    return this.wQ.data.length + this.wK.data.length + this.wV.data.length
+    return this.wQKV.data.length
   }
 
   private storeCache(
@@ -65,14 +57,52 @@ export class SelfAttention implements SyncModelLayer {
     this.lastCache = cached
   }
 
-  private computeQKVSync(input: Tensor2D): { q: Tensor2D; k: Tensor2D; v: Tensor2D } {
-    const workspace = new TensorWorkspace()
-    const q = T.zeros(input.rows, this.wQ.cols)
-    const k = T.zeros(input.rows, this.wK.cols)
-    const v = T.zeros(input.rows, this.wV.cols)
-    Ops.matMulIntoSync(input, this.wQ, q, { workspace })
-    Ops.matMulIntoSync(input, this.wK, k, { workspace })
-    Ops.matMulIntoSync(input, this.wV, v, { workspace })
+  private unpackProjectedQKV(projectedQKV: Tensor2D, q: Tensor2D, k: Tensor2D, v: Tensor2D): void {
+    const dim = this.embeddingDim
+    const projectedData = projectedQKV.data
+    const qData = q.data
+    const kData = k.data
+    const vData = v.data
+
+    for (let row = 0; row < projectedQKV.rows; row++) {
+      const projectedOffset = row * dim * 3
+      const rowOffset = row * dim
+      for (let col = 0; col < dim; col++) {
+        qData[rowOffset + col] = projectedData[projectedOffset + col]!
+        kData[rowOffset + col] = projectedData[projectedOffset + dim + col]!
+        vData[rowOffset + col] = projectedData[projectedOffset + dim * 2 + col]!
+      }
+    }
+  }
+
+  private packGradientsSync(gradQ: Tensor2D, gradK: Tensor2D, gradV: Tensor2D, out: Tensor2D): void {
+    const dim = this.embeddingDim
+    const outData = out.data
+    const qData = gradQ.data
+    const kData = gradK.data
+    const vData = gradV.data
+
+    for (let row = 0; row < out.rows; row++) {
+      const projectedOffset = row * dim * 3
+      const rowOffset = row * dim
+      for (let col = 0; col < dim; col++) {
+        outData[projectedOffset + col] = qData[rowOffset + col]!
+        outData[projectedOffset + dim + col] = kData[rowOffset + col]!
+        outData[projectedOffset + dim * 2 + col] = vData[rowOffset + col]!
+      }
+    }
+  }
+
+  private computeQKVSync(
+    input: Tensor2D,
+    workspace: TensorWorkspace
+  ): { q: Tensor2D; k: Tensor2D; v: Tensor2D } {
+    const projectedQKV = workspace.borrowTensor("projectedQKV", input.rows, this.embeddingDim * 3)
+    const q = workspace.borrowTensor("q", input.rows, this.embeddingDim)
+    const k = workspace.borrowTensor("k", input.rows, this.embeddingDim)
+    const v = workspace.borrowTensor("v", input.rows, this.embeddingDim)
+    Ops.matMulIntoSync(input, this.wQKV, projectedQKV, { workspace })
+    this.unpackProjectedQKV(projectedQKV, q, k, v)
     return { q, k, v }
   }
 
@@ -80,25 +110,26 @@ export class SelfAttention implements SyncModelLayer {
     q: Tensor2D,
     k: Tensor2D,
     v: Tensor2D,
+    workspace: TensorWorkspace,
     layout?: SequenceLayout
   ): { attnWeights: Tensor2D; attended: Tensor2D } {
     const dk = Math.sqrt(this.embeddingDim)
-    const workspace = new TensorWorkspace()
     const scores = workspace.borrowTensor("scores", q.rows, k.rows)
     Ops.matMulIntoSync(q, k, scores, { transposeB: true, workspace })
     Ops.mulScalarInPlace(scores, 1 / dk)
     Ops.maskCausalInPlace(scores, layout)
 
-    const attnWeights = T.zeros(scores.rows, scores.cols)
+    const attnWeights = workspace.borrowTensor("attnWeights", scores.rows, scores.cols)
     Ops.softmaxRowsInto(scores, attnWeights)
-    const attended = T.zeros(attnWeights.rows, v.cols)
+    const attended = workspace.borrowTensor("attended", attnWeights.rows, v.cols)
     Ops.matMulIntoSync(attnWeights, v, attended, { workspace })
     return { attnWeights, attended }
   }
 
   forwardSync(input: Tensor2D, context?: LayerForwardContext): Tensor2D {
-    const { q, k, v } = this.computeQKVSync(input)
-    const { attnWeights, attended } = this.attentionSync(q, k, v, context?.sequenceLayout)
+    const workspace = new TensorWorkspace()
+    const { q, k, v } = this.computeQKVSync(input, workspace)
+    const { attnWeights, attended } = this.attentionSync(q, k, v, workspace, context?.sequenceLayout)
     if (context?.captureCache !== false) {
       this.storeCache(context?.cacheKey, input, q, k, v, attnWeights)
     }
@@ -162,9 +193,10 @@ export class SelfAttention implements SyncModelLayer {
   prefillSync(input: Tensor2D, cache: SelfAttentionKvCache): Tensor2D {
     this.validateKvCacheSync(cache)
     this.ensureEmptyKvCacheSync(cache)
-    const { q, k, v } = this.computeQKVSync(input)
+    const workspace = new TensorWorkspace()
+    const { q, k, v } = this.computeQKVSync(input, workspace)
     this.storeKvRowsSync(k, v, cache)
-    const { attended } = this.attentionSync(q, k, v)
+    const { attended } = this.attentionSync(q, k, v, workspace)
     return Ops.addSync(attended, input)
   }
 
@@ -178,7 +210,8 @@ export class SelfAttention implements SyncModelLayer {
       throw new Ops.ShapeError(`decodeStep expects a single row, received ${input.rows}`)
     }
 
-    const { q, k, v } = this.computeQKVSync(input)
+    const workspace = new TensorWorkspace()
+    const { q, k, v } = this.computeQKVSync(input, workspace)
     this.storeKvRowsSync(k, v, cache)
 
     const seqLen = cache.length
@@ -255,7 +288,7 @@ export class SelfAttention implements SyncModelLayer {
     this.lastCache = null
 
     const { input, q, k, v, attnWeights } = cached
-    const scale = Math.sqrt(this.wQ.cols)
+    const scale = Math.sqrt(this.embeddingDim)
     const workspace = new TensorWorkspace()
 
     const gradAttnWeights = T.zeros(dOut.rows, v.rows)
@@ -268,35 +301,24 @@ export class SelfAttention implements SyncModelLayer {
     SelfAttention.softmaxBackwardInto(attnWeights, gradAttnWeights, gradScores)
     Ops.mulScalarInPlace(gradScores, 1 / scale)
 
-    const gradQ = T.zeros(gradScores.rows, k.cols)
+    const gradQ = T.zeros(gradScores.rows, this.embeddingDim)
     Ops.matMulIntoSync(gradScores, k, gradQ, { workspace })
-    const gradK = T.zeros(gradScores.cols, q.cols)
+    const gradK = T.zeros(gradScores.cols, this.embeddingDim)
     Ops.matMulIntoSync(gradScores, q, gradK, { transposeA: true, workspace })
 
-    const gradWQ = T.zeros(input.cols, gradQ.cols)
-    const gradWK = T.zeros(input.cols, gradK.cols)
-    const gradWV = T.zeros(input.cols, gradV.cols)
-    Ops.matMulIntoSync(input, gradQ, gradWQ, { transposeA: true, workspace })
-    Ops.matMulIntoSync(input, gradK, gradWK, { transposeA: true, workspace })
-    Ops.matMulIntoSync(input, gradV, gradWV, { transposeA: true, workspace })
+    const gradQKV = workspace.borrowTensor("gradQKV", gradQ.rows, this.embeddingDim * 3)
+    this.packGradientsSync(gradQ, gradK, gradV, gradQKV)
 
-    const gradInputQ = workspace.borrowTensor("gradInputQ", gradQ.rows, this.wQ.rows)
-    const gradInputK = workspace.borrowTensor("gradInputK", gradK.rows, this.wK.rows)
-    const gradInputV = workspace.borrowTensor("gradInputV", gradV.rows, this.wV.rows)
-    Ops.matMulIntoSync(gradQ, this.wQ, gradInputQ, { transposeB: true, workspace })
-    Ops.matMulIntoSync(gradK, this.wK, gradInputK, { transposeB: true, workspace })
-    Ops.matMulIntoSync(gradV, this.wV, gradInputV, { transposeB: true, workspace })
+    const gradWQKV = T.zeros(input.cols, this.embeddingDim * 3)
+    Ops.matMulIntoSync(input, gradQKV, gradWQKV, { transposeA: true, workspace })
 
-    const gradInputAttention = workspace.borrowTensor("gradInputAttention", gradInputQ.rows, gradInputQ.cols)
-    Ops.addIntoSync(gradInputQ, gradInputK, gradInputAttention)
-    const gradInputAttention2 = workspace.borrowTensor("gradInputAttention2", gradInputQ.rows, gradInputQ.cols)
-    Ops.addIntoSync(gradInputAttention, gradInputV, gradInputAttention2)
-    const gradInput = T.zeros(gradInputQ.rows, gradInputQ.cols)
-    Ops.addIntoSync(gradInputAttention2, dOut, gradInput)
+    const gradInputAttention = workspace.borrowTensor("gradInputAttention", gradQKV.rows, input.cols)
+    Ops.matMulIntoSync(gradQKV, this.wQKV, gradInputAttention, { transposeB: true, workspace })
 
-    this.optimizerWQ.step(this.wQ, gradWQ, lr)
-    this.optimizerWK.step(this.wK, gradWK, lr)
-    this.optimizerWV.step(this.wV, gradWV, lr)
+    const gradInput = T.zeros(gradInputAttention.rows, gradInputAttention.cols)
+    Ops.addIntoSync(gradInputAttention, dOut, gradInput)
+
+    this.projectionOptimizer.step(this.wQKV, gradWQKV, lr)
 
     return gradInput
   }

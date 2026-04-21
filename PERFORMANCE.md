@@ -35,6 +35,11 @@ Performance work in this repo should preserve the Effect-first architecture.
     - [src/model/OutputProjection.ts](/Users/erayack/Desktop/code/RustGPT/src/model/OutputProjection.ts:1)
   - `Ops.matMul()` / `matMulInto()` now route through a transpose-aware blocked JS GEMM backend with caller-owned scratch reuse. Backward and attention paths now use transpose flags instead of materializing temporary transposed tensors for GEMM-only use.
 
+- [x] **Fuse attention Q/K/V projection storage and projection GEMMs**
+  - Implemented in [src/model/SelfAttention.ts](/Users/erayack/Desktop/code/RustGPT/src/model/SelfAttention.ts:1).
+  - `SelfAttention` now stores Q/K/V projection weights in one fused `wQKV` tensor, projects all three activations with one GEMM, and collapses the projection-side backward pass to one fused weight-gradient GEMM plus one fused input-gradient GEMM.
+  - The fused storage is laid out as `[embeddingDim, 3 * embeddingDim]` so each unpacked Q/K/V block matches the original `input * wQ`, `input * wK`, and `input * wV` math exactly.
+
 - [x] **Pre-tokenize datasets per run / epoch**
   - Implemented in [src/training/train.ts](/Users/erayack/Desktop/code/RustGPT/src/training/train.ts:1).
   - Training now supports per-run corpus preparation, reusing prepared minibatches across epochs while keeping `Effect` orchestration intact. `train()` and the CLI opt into the cached path by default, while `trainStream()` preserves per-epoch stream consumption unless callers explicitly set `cacheScope: "perRun"`.

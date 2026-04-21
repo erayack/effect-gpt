@@ -57,7 +57,7 @@ describe("Train Loop", () => {
     const llm = createTinyLLM()
     const transformer = llm.network[1] as TransformerBlock
     const w1Before = T.clone(transformer.feedForward.w1)
-    const wQBefore = T.clone(transformer.attention.wQ)
+    const wQKVBefore = T.clone(transformer.attention.wQKV)
 
     Effect.runSync(
       train(tinyCorpus).pipe(
@@ -68,7 +68,7 @@ describe("Train Loop", () => {
     )
 
     expectNotClose(transformer.feedForward.w1, w1Before)
-    expectNotClose(transformer.attention.wQ, wQBefore)
+    expectNotClose(transformer.attention.wQKV, wQKVBefore)
   })
 
   test("training mutates output projection weights", () => {

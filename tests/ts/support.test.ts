@@ -122,9 +122,7 @@ describe("factories", () => {
   it("makeSelfAttention produces deterministic weights", () => {
     const a1 = makeSelfAttention({ seed: 42 })
     const a2 = makeSelfAttention({ seed: 42 })
-    expectClose(a1.wQ, a2.wQ)
-    expectClose(a1.wK, a2.wK)
-    expectClose(a1.wV, a2.wV)
+    expectClose(a1.wQKV, a2.wQKV)
   })
 
   it("makeFeedForward produces deterministic weights", () => {
@@ -145,7 +143,7 @@ describe("factories", () => {
   it("makeTransformerBlock produces deterministic weights", () => {
     const tb1 = makeTransformerBlock({ seed: 42 })
     const tb2 = makeTransformerBlock({ seed: 42 })
-    expectClose(tb1.attention.wQ, tb2.attention.wQ)
+    expectClose(tb1.attention.wQKV, tb2.attention.wQKV)
     expectClose(tb1.feedForward.w1, tb2.feedForward.w1)
   })
 

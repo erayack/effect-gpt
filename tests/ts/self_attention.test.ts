@@ -41,20 +41,16 @@ describe("SelfAttention", () => {
     expectShape(grad, [seqLen, EMBEDDING_DIM])
   })
 
-  test("backward updates wQ/wK/wV weights", () => {
+  test("backward updates fused QKV projection weights", () => {
     const attention = makeSelfAttention()
-    const wQBefore = T.clone(attention.wQ)
-    const wKBefore = T.clone(attention.wK)
-    const wVBefore = T.clone(attention.wV)
+    const wQKVBefore = T.clone(attention.wQKV)
 
     const input = T.ones(3, EMBEDDING_DIM)
     runEffect(attention.forward(input))
     const gradOut = T.ones(3, EMBEDDING_DIM)
     runEffect(attention.backward(gradOut, 0.01))
 
-    expectNotClose(attention.wQ, wQBefore)
-    expectNotClose(attention.wK, wKBefore)
-    expectNotClose(attention.wV, wVBefore)
+    expectNotClose(attention.wQKV, wQKVBefore)
   })
 
   test("batch layout prevents attention across flattened sequences", () => {
@@ -102,9 +98,7 @@ describe("SelfAttention", () => {
     const expected = runEffect(attention.forward(input))
 
     const cacheAttention = makeSelfAttention()
-    cacheAttention.wQ = T.clone(attention.wQ)
-    cacheAttention.wK = T.clone(attention.wK)
-    cacheAttention.wV = T.clone(attention.wV)
+    cacheAttention.wQKV = T.clone(attention.wQKV)
     const cache = cacheAttention.createKvCache(8)
 
     const actual = runEffect(cacheAttention.prefill(input, cache))
@@ -129,9 +123,7 @@ describe("SelfAttention", () => {
     const expectedLast = runEffect(Ops.rowAsMatrix(expectedFull, expectedFull.rows - 1))
 
     const cacheAttention = makeSelfAttention()
-    cacheAttention.wQ = T.clone(attention.wQ)
-    cacheAttention.wK = T.clone(attention.wK)
-    cacheAttention.wV = T.clone(attention.wV)
+    cacheAttention.wQKV = T.clone(attention.wQKV)
     const cache = cacheAttention.createKvCache(8)
 
     runEffect(cacheAttention.prefill(prefix, cache))
