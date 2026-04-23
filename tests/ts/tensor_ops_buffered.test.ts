@@ -369,6 +369,15 @@ describe("buffered tensor ops", () => {
     expectClose(actual, expected)
   })
 
+  test("gatherRowsInto rejects out-of-range row ids", () => {
+    const embeddings = T.fromArray(4, 2, [1, 10, 2, 20, 3, 30, 4, 40])
+    const actual = T.zeros(1, 2)
+
+    const error = runEffectFail(Ops.gatherRowsInto(embeddings, [4], actual))
+
+    expect(error.message).toContain("tokenId 4 out of bounds")
+  })
+
   test("crossEntropyLossAndDLogitsFromLogits matches softmax-based path", () => {
     const logits = T.fromArray(3, 4, [1, 3, 2, 0, -1, 0, 2, 4, 5, 1, 0, -2])
     const targets = [1, 3, 0]

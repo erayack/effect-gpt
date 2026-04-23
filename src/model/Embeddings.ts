@@ -82,16 +82,56 @@ export class Embeddings implements SyncModelLayer {
     if (endPosition > this.positionalEmbeddings.rows) {
       throw new Ops.ShapeError(`Sequence length ${endPosition} exceeds maximum ${this.positionalEmbeddings.rows}`)
     }
+    const vocabRows = this.tokenEmbeddings.rows
+    for (let i = 0; i < seqLen; i++) {
+      const tokenId = tokenIds[i]!
+      if (tokenId < 0 || tokenId >= vocabRows) {
+        throw new Ops.ShapeError(`Token ID ${tokenId} out of bounds for vocab size ${vocabRows}`)
+      }
+    }
 
     const workspace = state?.workspace ?? new TensorWorkspace()
-    const tokenEmbeds = workspace.borrowTensor("tokenEmbeds", tokenIds.length, this.tokenEmbeddings.cols)
-    const posEmbeds = workspace.borrowTensor("posEmbeds", tokenIds.length, this.positionalEmbeddings.cols)
-    const combined = workspace.borrowTensor("combined", tokenIds.length, this.tokenEmbeddings.cols)
+    const combined = workspace.borrowTensor("combined", seqLen, this.tokenEmbeddings.cols)
 
-    Ops.gatherRowsIntoSync(this.tokenEmbeddings, tokenIds, tokenEmbeds)
-    Ops.sliceRowsIntoSync(this.positionalEmbeddings, startPosition, endPosition, posEmbeds)
-    Ops.addIntoSync(tokenEmbeds, posEmbeds, combined)
+    this.embedContiguousPositionsInto(tokenIds, startPosition, combined)
     return combined
+  }
+
+  private embedContiguousPositionsInto(tokenIds: ArrayLike<number>, startPosition: number, out: Tensor2D): void {
+    const rows = tokenIds.length
+    const cols = this.tokenEmbeddings.cols
+    const tokenData = this.tokenEmbeddings.data
+    const positionData = this.positionalEmbeddings.data
+    const outData = out.data
+    let positionOffset = startPosition * cols
+    let outOffset = 0
+
+    for (let row = 0; row < rows; row++) {
+      const tokenOffset = tokenIds[row] * cols
+      for (let col = 0; col < cols; col++) {
+        outData[outOffset + col] = tokenData[tokenOffset + col] + positionData[positionOffset + col]
+      }
+      positionOffset += cols
+      outOffset += cols
+    }
+  }
+
+  private embedPositionIdsInto(tokenIds: ArrayLike<number>, positionIds: Int32Array, out: Tensor2D): void {
+    const rows = tokenIds.length
+    const cols = this.tokenEmbeddings.cols
+    const tokenData = this.tokenEmbeddings.data
+    const positionData = this.positionalEmbeddings.data
+    const outData = out.data
+    let outOffset = 0
+
+    for (let row = 0; row < rows; row++) {
+      const tokenOffset = tokenIds[row] * cols
+      const positionOffset = positionIds[row] * cols
+      for (let col = 0; col < cols; col++) {
+        outData[outOffset + col] = tokenData[tokenOffset + col] + positionData[positionOffset + col]
+      }
+      outOffset += cols
+    }
   }
 
   forwardTokensSync(tokenIds: ReadonlyArray<number>, state?: EmbeddingsInferenceState): Tensor2D {
@@ -103,7 +143,27 @@ export class Embeddings implements SyncModelLayer {
   }
 
   forwardTokenSync(tokenId: number, position: number, state?: EmbeddingsInferenceState): Tensor2D {
-    return this.embedTokenIdsSync([tokenId], position, state)
+    if (tokenId < 0 || tokenId >= this.tokenEmbeddings.rows) {
+      throw new Ops.ShapeError(`Token ID ${tokenId} out of bounds for vocab size ${this.tokenEmbeddings.rows}`)
+    }
+    if (position < 0 || position >= this.positionalEmbeddings.rows) {
+      throw new Ops.ShapeError(`Position ID ${position} out of bounds for max sequence length ${this.positionalEmbeddings.rows}`)
+    }
+
+    const workspace = state?.workspace ?? new TensorWorkspace()
+    const combined = workspace.borrowTensor("combined", 1, this.tokenEmbeddings.cols)
+    const cols = this.tokenEmbeddings.cols
+    const tokenOffset = tokenId * cols
+    const positionOffset = position * cols
+    const tokenData = this.tokenEmbeddings.data
+    const positionData = this.positionalEmbeddings.data
+    const outData = combined.data
+
+    for (let col = 0; col < cols; col++) {
+      outData[col] = tokenData[tokenOffset + col] + positionData[positionOffset + col]
+    }
+
+    return combined
   }
 
   forwardToken(tokenId: number, position: number): Effect.Effect<Tensor2D, ShapeError> {
@@ -111,10 +171,16 @@ export class Embeddings implements SyncModelLayer {
   }
 
   forwardSync(input: Tensor2D, context?: LayerForwardContext): Tensor2D {
-    const tokenIds = new Int32Array(input.data.length)
-    for (let i = 0; i < input.data.length; i++) {
+    const tokenCount = input.data.length
+    const tokenIds = new Int32Array(tokenCount)
+    const vocabRows = this.tokenEmbeddings.rows
+    for (let i = 0; i < tokenCount; i++) {
       // Match Rust's float-to-usize truncation behavior.
-      tokenIds[i] = Math.trunc(input.data[i])
+      const tokenId = Math.trunc(input.data[i])
+      if (tokenId < 0 || tokenId >= vocabRows) {
+        throw new Ops.ShapeError(`Token ID ${tokenId} out of bounds for vocab size ${vocabRows}`)
+      }
+      tokenIds[i] = tokenId
     }
 
     const seqLen = tokenIds.length
@@ -127,25 +193,40 @@ export class Embeddings implements SyncModelLayer {
       throw new Ops.ShapeError(`Sequence length ${seqLen} exceeds maximum ${this.positionalEmbeddings.rows}`)
     }
 
-    const positionIds = layout
-      ? new Int32Array(layout.positionIds)
-      : Int32Array.from({ length: seqLen }, (_, i) => i)
+    const positionIds = new Int32Array(seqLen)
+    if (layout) {
+      if (layout.positionIds.length !== seqLen) {
+        throw new Ops.ShapeError(
+          `Embeddings.forward: layout positionIds length (${layout.positionIds.length}) !== input length (${seqLen})`
+        )
+      }
+      const maxPositionRows = this.positionalEmbeddings.rows
+      for (let i = 0; i < seqLen; i++) {
+        const positionId = layout.positionIds[i]!
+        if (positionId < 0 || positionId >= maxPositionRows) {
+          throw new Ops.ShapeError(
+            `Position ID ${positionId} out of bounds for max sequence length ${maxPositionRows}`
+          )
+        }
+        positionIds[i] = positionId
+      }
+    } else {
+      for (let i = 0; i < seqLen; i++) {
+        positionIds[i] = i
+      }
+    }
 
     const captureCache = context?.captureCache !== false
     const workspace = captureCache ? this.acquireWorkspace() : new TensorWorkspace()
     let stored = false
     try {
-      const tokenEmbeds = workspace.borrowTensor("tokenEmbeds", seqLen, this.tokenEmbeddings.cols)
-      const posEmbeds = workspace.borrowTensor("posEmbeds", seqLen, this.positionalEmbeddings.cols)
       const combined = workspace.borrowTensor("combined", seqLen, this.tokenEmbeddings.cols)
 
-      Ops.gatherRowsIntoSync(this.tokenEmbeddings, tokenIds, tokenEmbeds)
       if (layout) {
-        Ops.gatherRowsIntoSync(this.positionalEmbeddings, positionIds, posEmbeds)
+        this.embedPositionIdsInto(tokenIds, positionIds, combined)
       } else {
-        Ops.sliceRowsIntoSync(this.positionalEmbeddings, 0, seqLen, posEmbeds)
+        this.embedContiguousPositionsInto(tokenIds, 0, combined)
       }
-      Ops.addIntoSync(tokenEmbeds, posEmbeds, combined)
       if (captureCache) {
         this.storeCache(context?.cacheKey, workspace, tokenIds, positionIds)
         stored = true
@@ -191,38 +272,36 @@ export class Embeddings implements SyncModelLayer {
       const positionRowToGradIndex = new Map<number, number>()
       const positionRows: Array<number> = []
 
-      for (let i = 0; i < tokenIds.length; i++) {
+      const tokenCount = tokenIds.length
+      for (let i = 0; i < tokenCount; i++) {
         const tokenId = tokenIds[i]
-        if (tokenId < 0 || tokenId >= this.tokenEmbeddings.rows) {
-          throw new Ops.ShapeError(`Token ID ${tokenId} out of bounds for vocab size ${this.tokenEmbeddings.rows}`)
-        }
         const positionId = positionIds[i]!
-        if (positionId < 0 || positionId >= this.positionalEmbeddings.rows) {
-          throw new Ops.ShapeError(
-            `Position ID ${positionId} out of bounds for max sequence length ${this.positionalEmbeddings.rows}`
-          )
-        }
-        if (!tokenRowToGradIndex.has(tokenId)) {
-          tokenRowToGradIndex.set(tokenId, tokenRows.length)
+        let tokenGradIndex = tokenRowToGradIndex.get(tokenId)
+        if (tokenGradIndex === undefined) {
+          tokenGradIndex = tokenRows.length
+          tokenRowToGradIndex.set(tokenId, tokenGradIndex)
           tokenRows.push(tokenId)
         }
-        if (!positionRowToGradIndex.has(positionId)) {
-          positionRowToGradIndex.set(positionId, positionRows.length)
+        let positionGradIndex = positionRowToGradIndex.get(positionId)
+        if (positionGradIndex === undefined) {
+          positionGradIndex = positionRows.length
+          positionRowToGradIndex.set(positionId, positionGradIndex)
           positionRows.push(positionId)
         }
       }
 
       const tokenGradRows = new Float32Array(tokenRows.length * cols)
       const positionGradRows = new Float32Array(positionRows.length * cols)
+      const dOutData = dOut.data
 
-      for (let i = 0; i < tokenIds.length; i++) {
+      for (let i = 0; i < tokenCount; i++) {
         const tokenGradRow = tokenRowToGradIndex.get(tokenIds[i])!
         const positionGradRow = positionRowToGradIndex.get(positionIds[i]!)!
         const rowOffset = i * cols
         const tokenOffset = tokenGradRow * cols
         const positionOffset = positionGradRow * cols
         for (let j = 0; j < cols; j++) {
-          const grad = dOut.data[rowOffset + j]
+          const grad = dOutData[rowOffset + j]
           tokenGradRows[tokenOffset + j] += grad
           positionGradRows[positionOffset + j] += grad
         }

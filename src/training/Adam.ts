@@ -55,13 +55,15 @@ export class Adam {
     const { oneMinusB1, oneMinusB2, invMHatScale, invVHatScale } = this.nextScales()
     const beta1 = this.beta1
     const beta2 = this.beta2
+    const epsilon = this.epsilon
 
     const mData = this.m.data
     const vData = this.v.data
     const pData = params.data
     const gData = grads.data
 
-    for (let i = 0; i < gData.length; i++) {
+    const length = gData.length
+    for (let i = 0; i < length; i++) {
       const g = gData[i]
       const m = mData[i] * beta1 + g * oneMinusB1
       const v = vData[i] * beta2 + g * g * oneMinusB2
@@ -69,7 +71,7 @@ export class Adam {
       vData[i] = v
       const mHat = m * invMHatScale
       const vHat = v * invVHatScale
-      pData[i] -= lr * (mHat / (Math.sqrt(vHat) + this.epsilon))
+      pData[i] -= lr * (mHat / (Math.sqrt(vHat) + epsilon))
     }
   }
 
@@ -87,29 +89,28 @@ export class Adam {
     const { oneMinusB1, oneMinusB2, invMHatScale, invVHatScale } = this.nextScales()
     const beta1 = this.beta1
     const beta2 = this.beta2
+    const epsilon = this.epsilon
     const cols = params.cols
+    const rowCount = rowIndices.length
 
     const mData = this.m.data
     const vData = this.v.data
     const pData = params.data
 
-    for (let row = 0; row < rowIndices.length; row++) {
+    for (let row = 0; row < rowCount; row++) {
       const paramRow = rowIndices[row]!
-      if (paramRow < 0 || paramRow >= params.rows) {
-        throw new ShapeError(`Adam.stepRows: row ${paramRow} out of bounds for params.rows ${params.rows}`)
-      }
-      const paramOffset = paramRow * cols
-      const gradOffset = row * cols
-      for (let col = 0; col < cols; col++) {
-        const index = paramOffset + col
-        const g = gradRows[gradOffset + col]
+      let index = paramRow * cols
+      const end = index + cols
+      let gradIndex = row * cols
+      for (; index < end; index++, gradIndex++) {
+        const g = gradRows[gradIndex]
         const m = mData[index] * beta1 + g * oneMinusB1
         const v = vData[index] * beta2 + g * g * oneMinusB2
         mData[index] = m
         vData[index] = v
         const mHat = m * invMHatScale
         const vHat = v * invVHatScale
-        pData[index] -= lr * (mHat / (Math.sqrt(vHat) + this.epsilon))
+        pData[index] -= lr * (mHat / (Math.sqrt(vHat) + epsilon))
       }
     }
   }

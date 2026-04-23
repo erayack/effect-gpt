@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test"
-import { runEffect } from "./support/runEffect"
+import { runEffect, runEffectFail } from "./support/runEffect"
 import { expectShape, expectNotClose, expectFinite } from "./support/tensorMatchers"
 import { makeEmbeddings } from "./support/factories"
 import * as T from "../../src/tensor/Tensor2D"
@@ -56,6 +56,36 @@ describe("Embeddings", () => {
     const output = runEffect(embeddings.forward(input))
     expectShape(output, [MAX_SEQ_LEN, EMBEDDING_DIM])
     expectFinite(output)
+  })
+
+  test("forward rejects out-of-range token ids at the boundary", () => {
+    const embeddings = makeEmbeddings(10)
+    const input = T.fromArray(1, 1, [10])
+
+    const error = runEffectFail(embeddings.forward(input))
+
+    expect(error.message).toContain("Token ID 10 out of bounds")
+  })
+
+  test("forward rejects out-of-range layout position ids at the boundary", () => {
+    const embeddings = makeEmbeddings(10)
+    const input = T.fromArray(1, 1, [0])
+    const layout: SequenceLayout = {
+      totalTokens: 1,
+      sequenceLengths: [1],
+      sequenceIds: new Int32Array([0]),
+      positionIds: new Int32Array([MAX_SEQ_LEN])
+    }
+
+    const error = runEffectFail(embeddings.forward(input, { sequenceLayout: layout }))
+
+    expect(error.message).toContain(`Position ID ${MAX_SEQ_LEN} out of bounds`)
+  })
+
+  test("forwardTokenSync rejects out-of-range positions at the boundary", () => {
+    const embeddings = makeEmbeddings(10)
+
+    expect(() => embeddings.forwardTokenSync(0, MAX_SEQ_LEN)).toThrow("out of bounds")
   })
 
   test("backward updates token & positional embeddings", () => {

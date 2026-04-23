@@ -552,6 +552,61 @@ const zeroAttentionBackwardOutputs = (dQ: Float32Array, dK: Float32Array, dV: Fl
   dV.fill(0)
 }
 
+const fusedScaledDotProductAttentionCausalIntoSync = (
+  q: Tensor2D,
+  k: Tensor2D,
+  v: Tensor2D,
+  out: Tensor2D,
+  scratch: Float32Array
+): void => {
+  const qRows = q.rows
+  const qCols = q.cols
+  const kRows = k.rows
+  const vCols = v.cols
+  const scale = 1 / Math.sqrt(qCols)
+  const qData = q.data
+  const kData = k.data
+  const vData = v.data
+  const outData = out.data
+  outData.fill(0)
+
+  for (let queryRow = 0; queryRow < qRows; queryRow++) {
+    const qOffset = queryRow * qCols
+    const activeKeys = Math.min(queryRow + 1, kRows)
+    let maxScore = -Infinity
+
+    for (let keyRow = 0; keyRow < activeKeys; keyRow++) {
+      const kOffset = keyRow * qCols
+      let score = 0
+      for (let col = 0; col < qCols; col++) {
+        score += qData[qOffset + col]! * kData[kOffset + col]!
+      }
+      score *= scale
+      scratch[keyRow] = score
+      if (score > maxScore) {
+        maxScore = score
+      }
+    }
+
+    let sumExp = 0
+    for (let keyRow = 0; keyRow < activeKeys; keyRow++) {
+      const weight = Math.exp(scratch[keyRow]! - maxScore)
+      scratch[keyRow] = weight
+      sumExp += weight
+    }
+
+    const outOffset = queryRow * vCols
+    const invSumExp = 1 / sumExp
+    for (let keyRow = 0; keyRow < activeKeys; keyRow++) {
+      const weight = scratch[keyRow]! * invSumExp
+      const vOffset = keyRow * vCols
+      for (let col = 0; col < vCols; col++) {
+        outData[outOffset + col] += weight * vData[vOffset + col]!
+      }
+    }
+  }
+}
+
 export const fusedScaledDotProductAttentionIntoSync = (
   q: Tensor2D,
   k: Tensor2D,
@@ -593,6 +648,11 @@ export const fusedScaledDotProductAttentionIntoSync = (
   const scratch =
     options?.workspace?.borrowVectorAtLeast("fusedAttentionScores", k.rows) ??
     new Float32Array(k.rows)
+
+  if (causalMask && !layout && !weightsOut) {
+    fusedScaledDotProductAttentionCausalIntoSync(q, k, v, out, scratch)
+    return
+  }
 
   const qCols = q.cols
   const vCols = v.cols
@@ -725,6 +785,66 @@ export const fusedSdpaBackwardIntoSync = (
 
   zeroAttentionBackwardOutputs(dQData, dKData, dVData)
 
+  if (causalMask && !layout) {
+    for (let queryRow = 0; queryRow < qRows; queryRow++) {
+      const qOffset = queryRow * qCols
+      const dOutOffset = queryRow * vCols
+      const activeKeys = Math.min(queryRow + 1, kRows)
+      let maxScore = -Infinity
+
+      for (let keyRow = 0; keyRow < activeKeys; keyRow++) {
+        const kOffset = keyRow * qCols
+        let score = 0
+        for (let col = 0; col < qCols; col++) {
+          score += qData[qOffset + col]! * kData[kOffset + col]!
+        }
+        score *= scale
+        weightsScratch[keyRow] = score
+        if (score > maxScore) {
+          maxScore = score
+        }
+      }
+
+      let sumExp = 0
+      for (let keyRow = 0; keyRow < activeKeys; keyRow++) {
+        const weight = Math.exp(weightsScratch[keyRow]! - maxScore)
+        weightsScratch[keyRow] = weight
+        sumExp += weight
+      }
+
+      const invSumExp = 1 / sumExp
+      let softmaxDot = 0
+      for (let keyRow = 0; keyRow < activeKeys; keyRow++) {
+        const weight = weightsScratch[keyRow]! * invSumExp
+        weightsScratch[keyRow] = weight
+
+        const vOffset = keyRow * vCols
+        let gradWeight = 0
+        for (let col = 0; col < vCols; col++) {
+          const dOutValue = dOutData[dOutOffset + col]!
+          gradWeight += dOutValue * vData[vOffset + col]!
+          dVData[vOffset + col] += weight * dOutValue
+        }
+        gradScratch[keyRow] = gradWeight
+        softmaxDot += weight * gradWeight
+      }
+
+      for (let keyRow = 0; keyRow < activeKeys; keyRow++) {
+        gradScratch[keyRow] = weightsScratch[keyRow]! * (gradScratch[keyRow]! - softmaxDot) * scale
+      }
+
+      for (let keyRow = 0; keyRow < activeKeys; keyRow++) {
+        const dScore = gradScratch[keyRow]!
+        const kOffset = keyRow * qCols
+        for (let col = 0; col < qCols; col++) {
+          dQData[qOffset + col] += dScore * kData[kOffset + col]!
+          dKData[kOffset + col] += dScore * qData[qOffset + col]!
+        }
+      }
+    }
+    return
+  }
+
   for (let queryRow = 0; queryRow < qRows; queryRow++) {
     const qOffset = queryRow * qCols
     const dOutOffset = queryRow * vCols
@@ -837,23 +957,34 @@ export const transposeInto = (t: Tensor2D, out: Tensor2D): void => {
   }
 }
 
-export const gatherRowsIntoSync = (embeddings: Tensor2D, tokenIds: ArrayLike<number>, out: Tensor2D): void => {
-  validateOutputShape("gatherRows", out, tokenIds.length, embeddings.cols)
+export const gatherRowsIntoUncheckedSync = (embeddings: Tensor2D, tokenIds: ArrayLike<number>, out: Tensor2D): void => {
+  const tokenCount = tokenIds.length
   const cols = embeddings.cols
-  const rows = embeddings.rows
   const embeddingsData = embeddings.data
   const data = out.data
-  for (let i = 0; i < tokenIds.length; i++) {
+  let targetOffset = 0
+
+  for (let i = 0; i < tokenCount; i++) {
+    const tokenId = tokenIds[i]
+    const sourceOffset = tokenId * cols
+    for (let j = 0; j < cols; j++) {
+      data[targetOffset + j] = embeddingsData[sourceOffset + j]
+    }
+    targetOffset += cols
+  }
+}
+
+export const gatherRowsIntoSync = (embeddings: Tensor2D, tokenIds: ArrayLike<number>, out: Tensor2D): void => {
+  const tokenCount = tokenIds.length
+  validateOutputShape("gatherRows", out, tokenCount, embeddings.cols)
+  const rows = embeddings.rows
+  for (let i = 0; i < tokenCount; i++) {
     const tokenId = tokenIds[i]
     if (tokenId < 0 || tokenId >= rows) {
       throw new ShapeError(`gatherRows: tokenId ${tokenId} out of bounds [0, ${rows})`)
     }
-    const sourceOffset = tokenId * cols
-    const targetOffset = i * cols
-    for (let j = 0; j < cols; j++) {
-      data[targetOffset + j] = embeddingsData[sourceOffset + j]
-    }
   }
+  gatherRowsIntoUncheckedSync(embeddings, tokenIds, out)
 }
 
 export const gatherRowsInto = (embeddings: Tensor2D, tokenIds: ArrayLike<number>, out: Tensor2D): Effect.Effect<void, ShapeError> =>
